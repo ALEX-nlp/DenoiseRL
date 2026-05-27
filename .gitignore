@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# OS / IDE
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+
+# Keep .vscode for shared editor settings; uncomment to ignore.
+# .vscode/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+pip-wheel-metadata/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Test / coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Secrets / environment files (NEVER commit)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.yaml
+
+# ---------------------------------------------------------------------------
+# Training artifacts
+# ---------------------------------------------------------------------------
+ckpts/
+checkpoints/
+outputs/
+runs/
+logs/
+wandb/
+mlruns/
+mlflow/
+swanlog/
+ray_results/
+val_outputs/
+data_prepare_outputs/
+*.log
+
+# Model weights / large binaries
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+*.onnx
+
+# ---------------------------------------------------------------------------
+# Project-specific exports
+# ---------------------------------------------------------------------------
+readme.pdf
