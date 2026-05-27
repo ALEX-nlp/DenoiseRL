@@ -28,7 +28,6 @@ This repository contains the **official implementation** of *DenoiseRL: Bootstra
   - [6. Data Preparation](#6-data-preparation)
   - [7. Training](#7-training)
   - [8. Reproduction Guidance](#8-reproduction-guidance)
-  - [9. Citation](#9-citation)
 
 ---
 
@@ -193,7 +192,7 @@ To reproduce the headline numbers reported in the paper, we recommend:
 
 Deviating from any of the above (in particular enabling gradient on the prefix or removing the length-fair cap) is documented in the paper as a source of instability.
 
-## 9. Citation
+<!-- ## 9. Citation
 
 If you find this work useful, please consider citing:
 
@@ -206,4 +205,4 @@ If you find this work useful, please consider citing:
 }
 ```
 
-For questions or collaboration, please contact the corresponding authors as listed in the paper.
+For questions or collaboration, please contact the corresponding authors as listed in the paper. -->
