@@ -21,7 +21,7 @@ This repository contains the **official implementation** of *DenoiseRL: Bootstra
 - [DenoiseRL: Bootstrapping Reasoning Models to Recover from Noisy Prefixes](#denoiserl-bootstrapping-reasoning-models-to-recover-from-noisy-prefixes)
   - [Table of Contents](#table-of-contents)
   - [1. Motivation](#1-motivation)
-  - [2. Method at a Glance](#2-method-at-a-glance)
+  - [2. Method](#2-method)
   - [3. Key Results](#3-key-results)
   - [4. Repository Layout](#4-repository-layout)
   - [5. Installation](#5-installation)
@@ -40,7 +40,7 @@ State-of-the-art reasoning RL pipelines (e.g., GRPO and DAPO) are typically cons
 
 DenoiseRL departs from both directions. We **invert the role of weak models**: instead of treating them as imperfect supervisors, we exploit them as low-cost generators of structured corruptions. The policy is conditioned on truncated incorrect prefixes and trained — under standard verifiable rewards — to **denoise** the corrupted state and arrive at a verified solution. This casts reasoning RL as a denoising problem, drawing a conceptual parallel to denoising autoencoders and BART-style pretraining.
 
-## 2. Method at a Glance
+## 2. Method
 
 Each training step samples, per problem, a mixture of two rollout types and updates the policy with a single GRPO-style group baseline shared across the mixture:
 
