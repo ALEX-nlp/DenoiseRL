@@ -584,7 +584,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             return []
         wrongs = [w for w in wrongs if isinstance(w, str) and w.strip()]
 
-        # wrongs = wrongs[:1]
+        wrongs = wrongs[:1]
         if not wrongs or k <= 0:
             return []
         # Use a deterministic ordering plus cycle/sample when there are fewer than k candidates.
