@@ -46,7 +46,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from recipe.hint_learn.verifier import extract_last_boxed  # noqa: E402
+from recipe.denoise.verifier import extract_last_boxed  # noqa: E402
 from verl.utils.reward_score.think_test_math import compute_score  # noqa: E402
 
 

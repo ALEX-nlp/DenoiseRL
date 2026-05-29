@@ -120,13 +120,6 @@ DenoiseRL builds on a customized fork of `verl`. Two steps in particular are **m
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# (2) Critical: register the local `verl` framework in editable mode.
-# This is required for the DenoiseRL recipe to import and override the
-# trainer / rollout components shipped in this repository.
-cd verl
-pip install --no-deps -e .
-cd ..
 ```
 
 > **Note.** The `--no-deps` flag is intentional: dependency resolution is already pinned via `requirements.txt`, and re-resolving from `verl/setup.py` can silently override critical versions (e.g., `vllm`, `transformers`, `flash-attn`). The editable install ensures that any local modification to the framework propagates at runtime without re-installation.
