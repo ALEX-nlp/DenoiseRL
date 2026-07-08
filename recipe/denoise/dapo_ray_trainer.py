@@ -170,6 +170,41 @@ def problem_id_avg_acc_distribution_metrics(problem_id_to_avg_acc: dict) -> dict
     return out
 
 
+def compute_rollout_type_acc_metrics(batch: DataProto) -> dict:
+    """Mean verifier acc split by base vs noisy rollout rows.
+
+    Rows with ``partial_response_len > 0`` are noisy rollouts; rows with
+    ``partial_response_len == 0`` are base/main rollouts, including fallback sub slots
+    where no noisy prefix was attached.
+    """
+    acc_vals = batch.non_tensor_batch.get("acc", None)
+    if acc_vals is None:
+        return {}
+
+    acc_arr = np.asarray(acc_vals, dtype=np.float32)
+    if acc_arr.size == 0:
+        return {}
+
+    partial_lens = batch.non_tensor_batch.get("partial_response_len", None)
+    if partial_lens is None:
+        partial_arr = np.zeros_like(acc_arr, dtype=np.int64)
+    else:
+        partial_arr = np.asarray(partial_lens, dtype=np.int64)
+        n = min(acc_arr.size, partial_arr.size)
+        acc_arr = acc_arr[:n]
+        partial_arr = partial_arr[:n]
+
+    finite = np.isfinite(acc_arr)
+    metrics = {}
+    base_acc = acc_arr[finite & (partial_arr == 0)]
+    noise_acc = acc_arr[finite & (partial_arr > 0)]
+    if base_acc.size > 0:
+        metrics["reward_model/acc_base"] = float(np.mean(base_acc))
+    if noise_acc.size > 0:
+        metrics["reward_model/acc_noise"] = float(np.mean(noise_acc))
+    return metrics
+
+
 def decode_rollout_response_str(tokenizer, prompt_ids, response_ids, attention_mask):
     """
     Decode the valid response segment for a single rollout row. Layout matches VERL after
@@ -479,6 +514,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     acc_finite = acc_vals[np.isfinite(acc_vals)]
                     if acc_finite.size > 0:
                         metrics["reward_model/acc"] = float(np.mean(acc_finite))
+                    metrics.update(compute_rollout_type_acc_metrics(batch))
 
                 logger.log(data=metrics, step=self.global_steps)
 
