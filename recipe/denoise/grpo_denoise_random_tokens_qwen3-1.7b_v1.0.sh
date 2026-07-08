@@ -6,7 +6,7 @@ set -euxo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export noise_source=random_tokens
-export random_noise_len=${random_noise_len:-512}
+export random_noise_len=${random_noise_len:-128}
 export random_noise_exclude_special=${random_noise_exclude_special:-True}
 export TRAIN_FILE=${TRAIN_FILE:-"./data/MATH7500-train.parquet"}
 

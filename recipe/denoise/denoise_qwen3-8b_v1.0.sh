@@ -100,7 +100,7 @@ use_same_uid=False
 model_name="Qwen3-8B-Base"
 offload=True
 ref_offload=True
-num_gpus=8
+num_gpus=4
 tensor_model_parallel_size=2
 
 # -----------------------------------------------------------------------------
@@ -144,7 +144,7 @@ filter_groups_metric=acc
 # Paths
 # -----------------------------------------------------------------------------
 RAY_DATA_HOME=${RAY_DATA_HOME:-"."}
-MODEL_PATH=${MODEL_PATH:-"../Qwen/${model_name}"}
+MODEL_PATH=${MODEL_PATH:-"../Model//Qwen/${model_name}"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"./data/MATH7500.with_wrong_boxed.qwen2.5-3b.parquet"}
 TEST_FILE=${TEST_FILE:-["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]}
