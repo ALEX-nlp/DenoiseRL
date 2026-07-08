@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 export WANDB_MODE=offline
-version="v1.0"
+version="2_v1.0"
 
 # -----------------------------------------------------------------------------
 # denoise specific knobs
