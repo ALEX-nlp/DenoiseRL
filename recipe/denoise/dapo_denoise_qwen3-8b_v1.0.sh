@@ -22,8 +22,8 @@ gen_batch_size=64
 #   * "none"    - response width = R + max_partial_len; NO truncation (per-row
 #                 output is p_i + R; NOT length-fair vs main rollouts). partial_wrong
 #                 gets response_mask = 0; all R generated tokens preserved.
-n_resp_per_prompt=12
-sub_rollout_k=4
+n_resp_per_prompt=${n_resp_per_prompt:-12}
+sub_rollout_k=${sub_rollout_k:-4}
 partial_mode=cutdown
 
 # -----------------------------------------------------------------------------
@@ -96,7 +96,7 @@ train_prompt_bsz=16
 train_prompt_mini_bsz=16
 force_on_policy=True
 
-wandb_run_id="8B-DAPO_${version}_${sub_rollout_k}_${ratio_tag}_adv-split-${sub_rollout_separate_adv_uid}_loss-split-${sub_rollout_separate_loss_group}_sub-mult-${sub_rollout_loss_multiplier}_denoise_v1.0_partial_wrong"
+wandb_run_id=${wandb_run_id:-"8B-DAPO_${version}_${sub_rollout_k}_${ratio_tag}_adv-split-${sub_rollout_separate_adv_uid}_loss-split-${sub_rollout_separate_loss_group}_sub-mult-${sub_rollout_loss_multiplier}_denoise_v1.0_partial_wrong"}
 exp_name=${exp_name:-"8B-DAPO_debug_${version}-partial-wrong-k-${sub_rollout_k}-ratio-${ratio_tag}-adv-split-${sub_rollout_separate_adv_uid}-loss-split-${sub_rollout_separate_loss_group}-sub-mult-${sub_rollout_loss_multiplier}-problem-id-${use_problem_id_as_uid}-response-same-${use_same_uid}-model-${model_name}-lr-${lr}-bsz-${train_prompt_bsz}-n_resp-${n_resp_per_prompt}-mini-${train_prompt_mini_bsz}"}
 
 adv_estimator=grpo

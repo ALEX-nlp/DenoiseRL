@@ -24,8 +24,8 @@ version="2_v1.0"
 #   * "none"    - response width = R + max_partial_len; NO truncation (per-row
 #                 output is p_i + R; NOT length-fair vs main rollouts). noisy_prefix
 #                 gets response_mask = 0; all R generated tokens preserved.
-n_resp_per_prompt=12
-sub_rollout_k=4
+n_resp_per_prompt=${n_resp_per_prompt:-12}
+sub_rollout_k=${sub_rollout_k:-4}
 partial_mode=cutdown
 noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
 random_noise_len=${random_noise_len:-512}
@@ -118,7 +118,7 @@ train_prompt_bsz=16
 train_prompt_mini_bsz=16
 force_on_policy=True
 
-wandb_run_id="${version}_${sub_rollout_k}_${noise_run_tag}_adv-split-${sub_rollout_separate_adv_uid}_loss-split-${sub_rollout_separate_loss_group}_sub-mult-${sub_rollout_loss_multiplier}_denoise_v1.0_${noise_source_tag}"
+wandb_run_id=${wandb_run_id:-"${version}_${sub_rollout_k}_${noise_run_tag}_adv-split-${sub_rollout_separate_adv_uid}_loss-split-${sub_rollout_separate_loss_group}_sub-mult-${sub_rollout_loss_multiplier}_denoise_v1.0_${noise_source_tag}"}
 exp_name=${exp_name:-"debug_${version}-${noise_exp_tag}-adv-split-${sub_rollout_separate_adv_uid}-loss-split-${sub_rollout_separate_loss_group}-sub-mult-${sub_rollout_loss_multiplier}-problem-id-${use_problem_id_as_uid}-response-same-${use_same_uid}-model-${model_name}-lr-${lr}-bsz-${train_prompt_bsz}-n_resp-${n_resp_per_prompt}-mini-${train_prompt_mini_bsz}"}
 
 adv_estimator=grpo
