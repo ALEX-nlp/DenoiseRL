@@ -7,23 +7,29 @@ version="v1.0"
 # denoise specific knobs
 # -----------------------------------------------------------------------------
 # Each prompt produces N "main" rollouts and K "sub" rollouts. Sub rollouts use
-# the first ``part_response_ratio`` (by tokens) of a row drawn from
-# ``wrong_answer_with_boxed`` as a partial assistant prefix; the model continues
-# from that prefix with ``continue_final_message=True``. After rollout the
-# partial-wrong prefix is folded into the response window per ``partial_mode``:
+# ``noise_source`` to choose the noisy assistant prefix before the model response:
+#   * "partial_wrong" - first ``part_response_ratio`` (by tokens) of a row drawn
+#                       from ``wrong_answer_with_boxed``.
+#   * "random_tokens" - ``random_noise_len`` random tokenizer ids sampled from
+#                       the tokenizer vocabulary.
+# After rollout the noisy prefix is folded into the response window per
+# ``partial_mode``:
 #   * "shift"   - response width = R; trailing p_i tokens truncated so
-#                 partial_wrong + kept_continuation <= R (length-fair). partial_wrong
+#                 noisy_prefix + kept_continuation <= R (length-fair). noisy_prefix
 #                 gets response_mask = 1 (gradient flows through the off-policy
 #                 prefix). Max signal but potentially less stable.
-#   * "cutdown" - response width = R; same truncation as "shift". partial_wrong gets
+#   * "cutdown" - response width = R; same truncation as "shift". noisy_prefix gets
 #                 response_mask = 0 (no gradient on the prefix). More stable, less
 #                 signal.
 #   * "none"    - response width = R + max_partial_len; NO truncation (per-row
-#                 output is p_i + R; NOT length-fair vs main rollouts). partial_wrong
+#                 output is p_i + R; NOT length-fair vs main rollouts). noisy_prefix
 #                 gets response_mask = 0; all R generated tokens preserved.
 n_resp_per_prompt=12
 sub_rollout_k=4
 partial_mode=cutdown
+noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
+random_noise_len=${random_noise_len:-512}
+random_noise_exclude_special=${random_noise_exclude_special:-True}
 
 # -----------------------------------------------------------------------------
 # part_response_ratio sampling strategy
@@ -56,6 +62,23 @@ case "${part_response_ratio_strategy}" in
         ;;
     *)
         echo "Unknown part_response_ratio_strategy: ${part_response_ratio_strategy}" >&2
+        exit 1
+        ;;
+esac
+
+case "${noise_source}" in
+    partial_wrong)
+        noise_run_tag="${ratio_tag}"
+        noise_source_tag="partial_wrong"
+        noise_exp_tag="partial-wrong-k-${sub_rollout_k}-ratio-${ratio_tag}"
+        ;;
+    random_tokens)
+        noise_run_tag="random-tokens-len${random_noise_len}"
+        noise_source_tag="random_tokens"
+        noise_exp_tag="random-tokens-k-${sub_rollout_k}-len-${random_noise_len}"
+        ;;
+    *)
+        echo "Unknown noise_source: ${noise_source}" >&2
         exit 1
         ;;
 esac
@@ -95,8 +118,8 @@ train_prompt_bsz=16
 train_prompt_mini_bsz=16
 force_on_policy=True
 
-wandb_run_id="${version}_${sub_rollout_k}_${ratio_tag}_adv-split-${sub_rollout_separate_adv_uid}_loss-split-${sub_rollout_separate_loss_group}_sub-mult-${sub_rollout_loss_multiplier}_denoise_v1.0_partial_wrong"
-exp_name=${exp_name:-"debug_${version}-partial-wrong-k-${sub_rollout_k}-ratio-${ratio_tag}-adv-split-${sub_rollout_separate_adv_uid}-loss-split-${sub_rollout_separate_loss_group}-sub-mult-${sub_rollout_loss_multiplier}-problem-id-${use_problem_id_as_uid}-response-same-${use_same_uid}-model-${model_name}-lr-${lr}-bsz-${train_prompt_bsz}-n_resp-${n_resp_per_prompt}-mini-${train_prompt_mini_bsz}"}
+wandb_run_id="${version}_${sub_rollout_k}_${noise_run_tag}_adv-split-${sub_rollout_separate_adv_uid}_loss-split-${sub_rollout_separate_loss_group}_sub-mult-${sub_rollout_loss_multiplier}_denoise_v1.0_${noise_source_tag}"
+exp_name=${exp_name:-"debug_${version}-${noise_exp_tag}-adv-split-${sub_rollout_separate_adv_uid}-loss-split-${sub_rollout_separate_loss_group}-sub-mult-${sub_rollout_loss_multiplier}-problem-id-${use_problem_id_as_uid}-response-same-${use_same_uid}-model-${model_name}-lr-${lr}-bsz-${train_prompt_bsz}-n_resp-${n_resp_per_prompt}-mini-${train_prompt_mini_bsz}"}
 
 adv_estimator=grpo
 
@@ -217,6 +240,9 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise.main_dapo \
     trainer.resume_mode=auto \
     +trainer.max_actor_ckpt_to_keep=1 \
     +trainer.sub_rollout_k=${sub_rollout_k} \
+    +trainer.noise_source=${noise_source} \
+    +trainer.random_noise_len=${random_noise_len} \
+    +trainer.random_noise_exclude_special=${random_noise_exclude_special} \
     +trainer.part_response_ratio_strategy=${part_response_ratio_strategy} \
     +trainer.part_response_ratio_fixed=${part_response_ratio_fixed} \
     +trainer.part_response_ratio_mean=${part_response_ratio_mean} \

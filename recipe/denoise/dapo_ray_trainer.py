@@ -18,32 +18,34 @@ Per ``train_batch`` we issue **one** ``generate_sequences`` call that produces `
 trajectories per prompt:
 
 * ``N`` "main" rollouts: standard generation from the original prompt.
-* ``K`` "sub" rollouts: continuation from a partial wrong solution drawn from the
-  ``wrong_answer_with_boxed`` column (produced by ``data_prepare.py``). The first
-  ``part_response_ratio`` of the wrong solution (measured in **tokens**, default 0.5)
-  is appended to the prompt as an ``assistant`` message with
-  ``continue_final_message=True`` so the policy continues writing from that prefix.
+* ``K`` "sub" rollouts: continuation from a noisy assistant prefix. By default
+  (``trainer.noise_source = "partial_wrong"``), the prefix is drawn from a partial
+  wrong solution in the ``wrong_answer_with_boxed`` column (produced by
+  ``data_prepare.py``). When ``trainer.noise_source = "random_tokens"``, the prefix is
+  ``trainer.random_noise_len`` random tokenizer ids sampled from the tokenizer
+  vocabulary. The noisy tokens are appended to the prompt as an assistant prefix so
+  the policy continues writing from that prefix.
 
-For sub-rollouts, the partial-wrong prefix is folded into the response window after
+For sub-rollouts, the noisy prefix is folded into the response window after
 generation. ``trainer.partial_mode`` selects one of three behaviors:
 
 * ``"shift"`` (default): response width = ``R``; trailing ``p_i`` rollout tokens are
-  discarded so ``partial_wrong + kept_continuation <= R`` (length-fair vs main
-  rollouts); partial-wrong gets ``response_mask = 1`` so PPO loss covers
-  ``[partial_wrong, kept_continuation]``. More signal, but gradients flow through
+  discarded so ``noise_prefix + kept_continuation <= R`` (length-fair vs main
+  rollouts); the noisy prefix gets ``response_mask = 1`` so PPO loss covers
+  ``[noise_prefix, kept_continuation]``. More signal, but gradients flow through
   off-policy prefix tokens, which can be unstable when the prefix is heavily
   off-policy.
 * ``"cutdown"``: response width = ``R``; same length-fair truncation as ``"shift"``,
-  but partial-wrong gets ``response_mask = 0`` so PPO loss only covers
+  but the noisy prefix gets ``response_mask = 0`` so PPO loss only covers
   ``kept_continuation``. More stable, less signal.
 * ``"none"``: response width = ``R + max_partial_len``; NO truncation — total per-row
   output is ``p_i + R`` (not length-fair vs main rollouts but preserves every
-  generated token). Partial-wrong gets ``response_mask = 0`` (no gradient on the
+  generated token). The noisy prefix gets ``response_mask = 0`` (no gradient on the
   off-policy prefix); all ``R`` generated tokens participate in PPO loss.
 
-In every mode the partial-wrong prefix remains visible to the reward manager via
+In every mode the noisy prefix remains visible to the reward manager via
 ``attention_mask`` so the decoded answer contains the full
-``[partial_wrong, continuation]`` sequence (decoded length is ``p_i + kept`` for
+``[noise_prefix, continuation]`` sequence (decoded length is ``p_i + kept`` for
 ``shift`` / ``cutdown`` and ``p_i + R`` for ``none``). Rows without a partial prefix
 (the ``N`` main rollouts) are unaffected by the mode.
 """
@@ -267,18 +269,24 @@ class RayDAPOTrainer(RayPPOTrainer):
     """
     DAPO-style trainer with ``N + K`` unified rollouts per problem.
 
-    The ``K`` sub-rollouts are generated from a partial wrong solution (first
-    ``part_response_ratio`` of a row drawn from ``wrong_answer_with_boxed``) appended to
-    the prompt as an assistant message. After rollout the partial-wrong prefix is folded
+    The ``K`` sub-rollouts are generated from a noisy assistant prefix appended to
+    the prompt. ``trainer.noise_source`` controls the prefix source:
+
+    * ``"partial_wrong"`` (default): first ``part_response_ratio`` of a row drawn
+      from ``wrong_answer_with_boxed``.
+    * ``"random_tokens"``: ``random_noise_len`` random tokenizer ids sampled from
+      the tokenizer vocabulary.
+
+    After rollout the noisy prefix is folded
     into the response window per ``trainer.partial_mode``:
 
     * ``"shift"``   — response width = ``R``, length-fair truncation
-      (``partial_wrong + kept <= R``), partial-wrong ``response_mask = 1``
+      (``noise_prefix + kept <= R``), prefix ``response_mask = 1``
       (gradient on the prefix).
     * ``"cutdown"`` — response width = ``R``, same truncation as ``"shift"``,
-      partial-wrong ``response_mask = 0`` (no gradient on the prefix).
+      prefix ``response_mask = 0`` (no gradient on the prefix).
     * ``"none"``    — response width = ``R + max_partial_len``, NO truncation
-      (per-row output is ``p_i + R``), partial-wrong ``response_mask = 0``.
+      (per-row output is ``p_i + R``), prefix ``response_mask = 0``.
 
     See module docstring for details.
     """
@@ -593,32 +601,82 @@ class RayDAPOTrainer(RayPPOTrainer):
         # Cycle through the available wrongs to reach exactly k items.
         return [wrongs[j % len(wrongs)] for j in range(k)]
 
-    def _build_partial_inputs(
+    def _parse_bool_config(self, name: str, default: bool) -> bool:
+        """Parse a boolean config value that may arrive as a Python bool or string."""
+        raw = self.config.trainer.get(name, default)
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+        return bool(raw)
+
+    def _make_random_token_sampler(self):
+        """Build a zero-arg sampler for random token prefixes.
+
+        ``trainer.random_noise_len`` is measured in tokenizer ids. Special tokens are
+        excluded by default so the noise stays inside the model's normal text token
+        vocabulary instead of sampling PAD/EOS/chat-control ids.
+        """
+        cfg = self.config.trainer
+        noise_len = int(cfg.get("random_noise_len", 512))
+        if noise_len <= 0:
+            raise ValueError(f"trainer.random_noise_len must be > 0, got {noise_len}.")
+
+        try:
+            vocab_size = len(self.tokenizer)
+        except TypeError:
+            vocab_size = int(self.tokenizer.vocab_size)
+        if vocab_size <= 0:
+            raise ValueError(f"Tokenizer vocab size must be > 0, got {vocab_size}.")
+
+        exclude_special = self._parse_bool_config("random_noise_exclude_special", True)
+        excluded_ids = set()
+        if exclude_special:
+            excluded_ids.update(int(i) for i in getattr(self.tokenizer, "all_special_ids", []) if i is not None)
+            for maybe_id in (
+                getattr(self.tokenizer, "pad_token_id", None),
+                getattr(self.tokenizer, "eos_token_id", None),
+                getattr(self.tokenizer, "bos_token_id", None),
+            ):
+                if maybe_id is not None:
+                    excluded_ids.add(int(maybe_id))
+
+        candidate_ids = np.asarray(
+            [i for i in range(vocab_size) if i not in excluded_ids],
+            dtype=np.int64,
+        )
+        if candidate_ids.size == 0:
+            raise ValueError(
+                "No candidate token ids remain for random token noise. "
+                "Set trainer.random_noise_exclude_special=False or check tokenizer config."
+            )
+        rng = np.random.default_rng()
+
+        def _sample_random_tokens() -> List[int]:
+            idxs = rng.integers(0, candidate_ids.size, size=noise_len)
+            return candidate_ids[idxs].astype(np.int64).tolist()
+
+        return _sample_random_tokens, noise_len, int(candidate_ids.size), exclude_special
+
+    def _build_token_prefixed_inputs(
         self,
         prompt_messages: List[dict],
-        wrong_text: str,
-        part_response_ratio: float,
+        prefix_token_ids: List[int],
         max_prompt_length: int,
         truncation: str,
         pad_token_id: int,
         apply_kwargs: dict,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, int]:
         """
-        Render a prompt where the assistant message is the first ``part_response_ratio``
-        (by tokens) of ``wrong_text``. The rendering uses ``continue_final_message=True``
-        so the model continues writing directly from the partial prefix.
+        Render a prompt with ``prefix_token_ids`` appended after the assistant
+        generation prompt, so the model continues writing directly from that noisy
+        token prefix.
 
         Returns:
-            (input_ids[1, P], attention_mask[1, P], position_ids[1, P], raw_prompt_ids, partial_token_len)
+            (input_ids[1, P], attention_mask[1, P], position_ids[1, P], raw_prompt_ids, prefix_token_len)
             where ``P = max_prompt_length`` (left-padded).
         """
-        # Cut the wrong solution to the first part_response_ratio of its tokens.
-        wrong_token_ids = self.tokenizer.encode(wrong_text, add_special_tokens=False)
-        if not wrong_token_ids:
-            raise ValueError("Empty wrong solution after tokenization.")
-        cut = int(len(wrong_token_ids) * part_response_ratio)
-        cut = max(1, min(cut, len(wrong_token_ids)))
-        partial_text = self.tokenizer.decode(wrong_token_ids[:cut], skip_special_tokens=True)
+        if not prefix_token_ids:
+            raise ValueError("Empty noisy prefix tokens.")
+        prefix_token_ids = [int(token_id) for token_id in prefix_token_ids]
 
         # Render base prefix ([sys, user] with assistant generation prompt). Strip any
         # incoming continue_final_message flag so the base prefix is rendered cleanly.
@@ -629,14 +687,80 @@ class RayDAPOTrainer(RayPPOTrainer):
             tokenize=False,
             **clean_kwargs,
         )
-        full_text = base_text + partial_text
-
-        # Compute partial token length in the **rendered** sequence.
         base_ids = self.tokenizer.encode(base_text, add_special_tokens=False)
-        full_ids = self.tokenizer.encode(full_text, add_special_tokens=False)
-        partial_token_len = max(0, len(full_ids) - len(base_ids))
+        full_ids = base_ids + prefix_token_ids
+        prefix_token_len = len(prefix_token_ids)
+        if prefix_token_len <= 0:
+            raise ValueError("No noisy prefix tokens.")
 
         # Tokenize the full prompt for model input.
+        ids = torch.tensor([full_ids], dtype=torch.long)
+        mask = torch.ones_like(ids)
+        ids, mask = verl_F.postprocess_data(
+            input_ids=ids,
+            attention_mask=mask,
+            max_length=max_prompt_length,
+            pad_token_id=pad_token_id,
+            left_pad=True,
+            truncation=truncation,
+        )
+        pos = compute_position_id_with_mask(mask)
+
+        raw_prompt_ids = list(full_ids)
+        if len(raw_prompt_ids) > max_prompt_length:
+            if truncation == "left":
+                raw_prompt_ids = raw_prompt_ids[-max_prompt_length:]
+            elif truncation == "right":
+                raw_prompt_ids = raw_prompt_ids[:max_prompt_length]
+            elif truncation == "middle":
+                left_half = max_prompt_length // 2
+                right_half = max_prompt_length - left_half
+                raw_prompt_ids = raw_prompt_ids[:left_half] + raw_prompt_ids[-right_half:]
+            elif truncation == "error":
+                raise RuntimeError(
+                    f"Partial prompt length {len(raw_prompt_ids)} > max_prompt_length {max_prompt_length}."
+                )
+
+        # If post-padding truncation dropped some of the noisy prefix tokens, adjust
+        # to keep ``prefix_token_len`` consistent with the final tokenized window.
+        actual_len = int(mask.sum().item())
+        prefix_token_len = min(prefix_token_len, max(0, actual_len - 1))
+        if prefix_token_len <= 0:
+            raise ValueError("No noisy prefix tokens remain after prompt truncation.")
+
+        return ids, mask, pos, raw_prompt_ids, prefix_token_len
+
+    def _build_text_prefixed_inputs(
+        self,
+        prompt_messages: List[dict],
+        prefix_text: str,
+        max_prompt_length: int,
+        truncation: str,
+        pad_token_id: int,
+        apply_kwargs: dict,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, int]:
+        """
+        Render a prompt with ``prefix_text`` appended after the assistant generation
+        prompt, so the model continues writing directly from that noisy prefix.
+        """
+        if not isinstance(prefix_text, str) or prefix_text == "":
+            raise ValueError("Empty noisy prefix text.")
+
+        clean_kwargs = {k: v for k, v in apply_kwargs.items() if k != "continue_final_message"}
+        base_text = self.tokenizer.apply_chat_template(
+            list(prompt_messages),
+            add_generation_prompt=True,
+            tokenize=False,
+            **clean_kwargs,
+        )
+        full_text = base_text + prefix_text
+
+        base_ids = self.tokenizer.encode(base_text, add_special_tokens=False)
+        full_ids = self.tokenizer.encode(full_text, add_special_tokens=False)
+        prefix_token_len = max(0, len(full_ids) - len(base_ids))
+        if prefix_token_len <= 0:
+            raise ValueError("No noisy prefix tokens after tokenization.")
+
         model_inputs = self.tokenizer(full_text, return_tensors="pt", add_special_tokens=False)
         ids = model_inputs["input_ids"]
         mask = model_inputs["attention_mask"]
@@ -665,12 +789,47 @@ class RayDAPOTrainer(RayPPOTrainer):
                     f"Partial prompt length {len(raw_prompt_ids)} > max_prompt_length {max_prompt_length}."
                 )
 
-        # If post-padding truncation dropped some of the partial prefix tokens, adjust to keep
-        # ``partial_token_len`` consistent with the final tokenized window.
         actual_len = int(mask.sum().item())
-        partial_token_len = min(partial_token_len, max(0, actual_len - 1))
+        prefix_token_len = min(prefix_token_len, max(0, actual_len - 1))
+        if prefix_token_len <= 0:
+            raise ValueError("No noisy prefix tokens remain after prompt truncation.")
 
-        return ids, mask, pos, raw_prompt_ids, partial_token_len
+        return ids, mask, pos, raw_prompt_ids, prefix_token_len
+
+    def _build_partial_inputs(
+        self,
+        prompt_messages: List[dict],
+        wrong_text: str,
+        part_response_ratio: float,
+        max_prompt_length: int,
+        truncation: str,
+        pad_token_id: int,
+        apply_kwargs: dict,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, int]:
+        """
+        Render a prompt where the assistant message is the first ``part_response_ratio``
+        (by tokens) of ``wrong_text``. The rendering uses ``continue_final_message=True``
+        so the model continues writing directly from the partial prefix.
+
+        Returns:
+            (input_ids[1, P], attention_mask[1, P], position_ids[1, P], raw_prompt_ids, partial_token_len)
+            where ``P = max_prompt_length`` (left-padded).
+        """
+        # Cut the wrong solution to the first part_response_ratio of its tokens.
+        wrong_token_ids = self.tokenizer.encode(wrong_text, add_special_tokens=False)
+        if not wrong_token_ids:
+            raise ValueError("Empty wrong solution after tokenization.")
+        cut = int(len(wrong_token_ids) * part_response_ratio)
+        cut = max(1, min(cut, len(wrong_token_ids)))
+        partial_text = self.tokenizer.decode(wrong_token_ids[:cut], skip_special_tokens=True)
+        return self._build_text_prefixed_inputs(
+            prompt_messages=prompt_messages,
+            prefix_text=partial_text,
+            max_prompt_length=max_prompt_length,
+            truncation=truncation,
+            pad_token_id=pad_token_id,
+            apply_kwargs=apply_kwargs,
+        )
 
     def _fold_partial_into_response(
         self,
@@ -1029,18 +1188,17 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         Steps:
             1. Build ``B * (N + K)`` left-padded prompt tensors. The first ``N`` per problem are
-               the standard tokenization; the next ``K`` add a partial wrong solution as an
-               ``assistant`` message with ``continue_final_message=True``.
+               the standard tokenization; the next ``K`` add a noisy assistant prefix.
             2. Call ``generate_sequences`` once.
             3. For rows with a partial prefix, fold the prefix into the response window so the
-               reward manager sees ``[partial_wrong, continuation]``. Behavior is controlled by
+               reward manager sees ``[noise_prefix, continuation]``. Behavior is controlled by
                ``trainer.partial_mode``:
                  * ``"shift"``   — response width = ``R``, truncate the trailing ``p_i`` tokens
-                   (``partial_wrong + kept <= R``), partial-wrong ``mask = 1``.
+                   (``noise_prefix + kept <= R``), prefix ``mask = 1``.
                  * ``"cutdown"`` — response width = ``R``, same truncation as ``"shift"``,
-                   partial-wrong ``mask = 0``.
+                   prefix ``mask = 0``.
                  * ``"none"``    — response width = ``R + max_partial_len``, no truncation
-                   (per-row output is ``p_i + R``), partial-wrong ``mask = 0``.
+                   (per-row output is ``p_i + R``), prefix ``mask = 0``.
             4. Compute reward via the standard ``compute_reward`` flow.
 
         ``_metrics`` is the same metrics dict used by ``train_batch``; sub-rollout planning
@@ -1050,9 +1208,27 @@ class RayDAPOTrainer(RayPPOTrainer):
         k = int(self.config.trainer.get("sub_rollout_k", 0))
         if k < 0:
             raise ValueError(f"trainer.sub_rollout_k must be >= 0, got {k}.")
-        # Sub-rollouts draw a fresh part_response_ratio per slot via this sampler.
-        # The sampler validates configuration once and then returns floats in (0, 1].
-        sample_part_response_ratio = self._make_part_response_ratio_sampler()
+        noise_source = str(self.config.trainer.get("noise_source", "partial_wrong")).lower()
+        if noise_source not in ("partial_wrong", "random_tokens"):
+            raise ValueError(
+                "trainer.noise_source must be 'partial_wrong' or 'random_tokens', "
+                f"got {noise_source!r}."
+            )
+
+        # Sub-rollouts draw a fresh prefix per slot. Partial-wrong uses the existing
+        # token-ratio sampler; random-tokens samples tokenizer ids directly.
+        sample_part_response_ratio = None
+        sample_random_tokens = None
+        random_noise_len = 0
+        random_noise_vocab_size = 0
+        random_noise_exclude_special = True
+        if k > 0 and noise_source == "partial_wrong":
+            sample_part_response_ratio = self._make_part_response_ratio_sampler()
+        elif k > 0 and noise_source == "random_tokens":
+            sample_random_tokens, random_noise_len, random_noise_vocab_size, random_noise_exclude_special = (
+                self._make_random_token_sampler()
+            )
+
         partial_mode = str(self.config.trainer.get("partial_mode", "shift")).lower()
         if partial_mode not in ("shift", "cutdown", "none"):
             raise ValueError(
@@ -1085,11 +1261,13 @@ class RayDAPOTrainer(RayPPOTrainer):
         pad_token_id = self.tokenizer.pad_token_id
 
         problem_ids = new_batch.non_tensor_batch.get("problem_id", None)
-        if k > 0 and problem_ids is None:
+        if k > 0 and noise_source == "partial_wrong" and problem_ids is None:
             raise ValueError(
-                "sub_rollout_k > 0 requires 'problem_id' in the non-tensor batch "
+                "noise_source='partial_wrong' with sub_rollout_k > 0 requires "
+                "'problem_id' in the non-tensor batch "
                 "so that wrong_answer_with_boxed can be fetched from self.all_train_items."
             )
+        raw_prompt_messages = new_batch.non_tensor_batch.get("raw_prompt", None)
 
         # Build B * (N + K) rows: layout is [P0_n0, ..., P0_n(N-1), P0_k0, ..., P0_k(K-1), P1_n0, ...].
         flat_input_ids_rows: List[torch.Tensor] = []
@@ -1119,14 +1297,20 @@ class RayDAPOTrainer(RayPPOTrainer):
             if k <= 0:
                 continue
 
-            # K sub-rollouts: append a partial wrong solution and re-tokenize with
-            # continue_final_message=True. Wrong solutions come from self.all_train_items.
-            problem_id = problem_ids[b]
-            original_item = self.all_train_items.get(problem_id, {})
-            prompt_messages = original_item.get("prompt", None)
+            # K sub-rollouts: append a noisy assistant prefix and re-tokenize.
+            # Prefer the dataloader's raw chat (enabled by data.return_raw_chat=True);
+            # fall back to self.all_train_items for older runs.
+            problem_id = problem_ids[b] if problem_ids is not None else None
+            if raw_prompt_messages is not None:
+                prompt_messages = raw_prompt_messages[b]
+            else:
+                original_item = self.all_train_items.get(problem_id, {})
+                prompt_messages = original_item.get("prompt", None)
             if prompt_messages is None:
                 raise ValueError(
-                    f"problem_id {problem_id!r} has no 'prompt' field in self.all_train_items."
+                    f"Cannot find raw prompt messages for problem_id {problem_id!r}. "
+                    "Set data.return_raw_chat=True or keep the original prompt column "
+                    "available in self.all_train_items."
                 )
             # Normalize to a plain list[dict] in case the storage layer returned a numpy/Arrow type.
             try:
@@ -1136,37 +1320,39 @@ class RayDAPOTrainer(RayPPOTrainer):
                     f"Cannot coerce prompt for problem_id {problem_id!r} into list[dict]."
                 ) from exc
 
-            wrongs = self._select_wrong_solutions(problem_id, k)
-            if not wrongs:
+            wrongs = []
+            if noise_source == "partial_wrong":
+                wrongs = self._select_wrong_solutions(problem_id, k)
+            if noise_source == "partial_wrong" and not wrongs:
                 problems_without_wrongs += 1
 
             for j in range(k):
-                wrong_text = wrongs[j] if j < len(wrongs) else None
-                if not wrong_text:
-                    # Fall back to a standard rollout (no partial prefix) for this slot.
-                    flat_input_ids_rows.append(base_input_ids[b : b + 1])
-                    flat_attention_mask_rows.append(base_attention_mask[b : b + 1])
-                    flat_position_ids_rows.append(base_position_ids[b : b + 1])
-                    flat_raw_prompt_ids.append(
-                        list(base_raw_prompt_ids[b]) if base_raw_prompt_ids is not None else []
-                    )
-                    partial_lens_flat.append(0)
-                    n_sub_rows_fallback += 1
-                    continue
-
                 try:
-                    ids, mask, pos, raw_ids, p_len = self._build_partial_inputs(
-                        prompt_messages=prompt_messages,
-                        wrong_text=wrong_text,
-                        part_response_ratio=sample_part_response_ratio(),
-                        max_prompt_length=max_prompt_length,
-                        truncation=truncation,
-                        pad_token_id=pad_token_id,
-                        apply_kwargs=apply_kwargs,
-                    )
+                    if noise_source == "partial_wrong":
+                        wrong_text = wrongs[j] if j < len(wrongs) else None
+                        if not wrong_text:
+                            raise ValueError("No wrong solution available for this sub-rollout slot.")
+                        ids, mask, pos, raw_ids, p_len = self._build_partial_inputs(
+                            prompt_messages=prompt_messages,
+                            wrong_text=wrong_text,
+                            part_response_ratio=sample_part_response_ratio(),
+                            max_prompt_length=max_prompt_length,
+                            truncation=truncation,
+                            pad_token_id=pad_token_id,
+                            apply_kwargs=apply_kwargs,
+                        )
+                    else:
+                        ids, mask, pos, raw_ids, p_len = self._build_token_prefixed_inputs(
+                            prompt_messages=prompt_messages,
+                            prefix_token_ids=sample_random_tokens(),
+                            max_prompt_length=max_prompt_length,
+                            truncation=truncation,
+                            pad_token_id=pad_token_id,
+                            apply_kwargs=apply_kwargs,
+                        )
                 except Exception as exc:
                     print(
-                        f"[denoise] failed to build partial prompt for problem_id={problem_id!r}: "
+                        f"[denoise] failed to build {noise_source} prompt for problem_id={problem_id!r}: "
                         f"{exc}; falling back to a no-prefix rollout for this slot."
                     )
                     flat_input_ids_rows.append(base_input_ids[b : b + 1])
@@ -1228,16 +1414,16 @@ class RayDAPOTrainer(RayPPOTrainer):
         new_batch.non_tensor_batch["partial_response_len"] = partial_lens_np
         new_batch = new_batch.union(gen_batch_output)
 
-        # Fold the partial-wrong prefix into the response window. Three modes:
-        #   * "shift":   response width = R, partial_wrong gets response_mask = 1
+        # Fold the noisy prefix into the response window. Three modes:
+        #   * "shift":   response width = R, prefix gets response_mask = 1
         #                (gradient flows through the off-policy prefix; more signal,
         #                potentially less stable). Trailing p_i rollout tokens are
-        #                discarded to enforce partial_wrong + kept <= R.
-        #   * "cutdown": response width = R, partial_wrong gets response_mask = 0
+        #                discarded to enforce prefix + kept <= R.
+        #   * "cutdown": response width = R, prefix gets response_mask = 0
         #                (no gradient on the prefix; more stable, less signal).
         #                Trailing p_i rollout tokens are discarded.
         #   * "none":    response width = R + max_partial_len, no truncation
-        #                (per-row output length is p_i + R), partial_wrong gets
+        #                (per-row output length is p_i + R), prefix gets
         #                response_mask = 0. NOT length-fair vs main rollouts but
         #                preserves all generated tokens for comparison.
         max_partial_len = int(partial_lens_np.max()) if partial_lens_np.size > 0 else 0
@@ -1284,6 +1470,20 @@ class RayDAPOTrainer(RayPPOTrainer):
         _metrics["denoise/sub_rollout/n_sub_rows_fallback"] = float(n_sub_rows_fallback)
         _metrics["denoise/sub_rollout/n_problems_without_wrongs"] = float(problems_without_wrongs)
         _metrics["denoise/sub_rollout/max_partial_len"] = float(max_partial_len)
+        _metrics["denoise/sub_rollout/noise_source_partial_wrong"] = float(
+            noise_source == "partial_wrong"
+        )
+        _metrics["denoise/sub_rollout/noise_source_random_tokens"] = float(
+            noise_source == "random_tokens"
+        )
+        if noise_source == "random_tokens":
+            _metrics["denoise/sub_rollout/random_noise_len_tokens"] = float(random_noise_len)
+            _metrics["denoise/sub_rollout/random_noise_vocab_size"] = float(
+                random_noise_vocab_size
+            )
+            _metrics["denoise/sub_rollout/random_noise_exclude_special"] = float(
+                random_noise_exclude_special
+            )
         if n_sub_rows_with_prefix > 0:
             _metrics["denoise/sub_rollout/mean_partial_len"] = (
                 float(sum_partial_lens) / float(n_sub_rows_with_prefix)
