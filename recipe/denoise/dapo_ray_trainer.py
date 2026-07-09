@@ -65,6 +65,7 @@ from tensordict import TensorDict
 from tqdm import tqdm
 
 import verl.utils.torch_functional as verl_F
+from recipe.denoise.dynamic_rho import DynamicRhoController
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
@@ -356,6 +357,19 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         return batch
 
+    def _part_response_ratio_strategy(self) -> str:
+        return str(self.config.trainer.get("part_response_ratio_strategy", "fixed")).lower()
+
+    def _uses_dynamic_rho(self) -> bool:
+        return self._part_response_ratio_strategy() in ("dynamic", "dynamic_rho")
+
+    def _get_dynamic_rho_controller(self) -> DynamicRhoController:
+        controller = getattr(self, "_dynamic_rho_controller", None)
+        if controller is None:
+            controller = DynamicRhoController.from_trainer_config(self.config.trainer)
+            self._dynamic_rho_controller = controller
+        return controller
+
     def fit(self):
         """Main training loop: each step runs ``train_batch`` (rollout + reward + PPO update)."""
         from omegaconf import OmegaConf
@@ -383,6 +397,17 @@ class RayDAPOTrainer(RayPPOTrainer):
         self.all_train_items = {}
         for item in self.train_dataset.dataframe:
             self.all_train_items[item["problem_id"]] = item
+
+        dynamic_rho_controller = None
+        if self._uses_dynamic_rho():
+            dynamic_rho_controller = self._get_dynamic_rho_controller()
+            pprint(
+                "[denoise] dynamic rho enabled: "
+                f"initial={dynamic_rho_controller.current_rho}, "
+                f"range=[{dynamic_rho_controller.min_rho}, {dynamic_rho_controller.max_rho}], "
+                f"target_gap={dynamic_rho_controller.target_gap}, "
+                f"alpha={dynamic_rho_controller.alpha}"
+            )
 
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
@@ -516,6 +541,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                         metrics["reward_model/acc"] = float(np.mean(acc_finite))
                     metrics.update(compute_rollout_type_acc_metrics(batch))
 
+                if dynamic_rho_controller is not None:
+                    metrics.update(dynamic_rho_controller.update_from_metrics(metrics))
+
                 logger.log(data=metrics, step=self.global_steps)
 
                 if is_last_step:
@@ -551,12 +579,13 @@ class RayDAPOTrainer(RayPPOTrainer):
           * ``"normal"``  - draw from ``N(mean, std)`` then clip to
                             ``[low, high]``.
           * ``"uniform"`` - draw uniformly from ``[low, high]``.
+          * ``"dynamic"`` - use the feedback controller in ``dynamic_rho.py``.
 
         Bounds must satisfy ``0 < low <= high <= 1``. The returned ratio is always in
         ``(0, 1]`` so downstream tokenization invariants (``cut >= 1``) hold.
         """
         cfg = self.config.trainer
-        strategy = str(cfg.get("part_response_ratio_strategy", "fixed")).lower()
+        strategy = self._part_response_ratio_strategy()
 
         def _coerce_ratio(name: str, value, *, allow_one: bool = True) -> float:
             f = float(value)
@@ -575,10 +604,14 @@ class RayDAPOTrainer(RayPPOTrainer):
 
             return _sample_fixed
 
+        if strategy in ("dynamic", "dynamic_rho"):
+            controller = self._get_dynamic_rho_controller()
+            return controller.sample
+
         if strategy not in ("normal", "uniform"):
             raise ValueError(
                 "trainer.part_response_ratio_strategy must be one of "
-                f"'fixed' | 'normal' | 'uniform', got {strategy!r}."
+                f"'fixed' | 'normal' | 'uniform' | 'dynamic', got {strategy!r}."
             )
 
         low = _coerce_ratio("part_response_ratio_low", cfg.get("part_response_ratio_low", 0.1))
@@ -1318,6 +1351,7 @@ class RayDAPOTrainer(RayPPOTrainer):
         sum_partial_lens = 0
         max_observed_partial = 0
         problems_without_wrongs = 0
+        part_response_ratio_samples: List[float] = []
 
         for b in range(B):
             # N main rollouts: reuse the dataloader tokenization.
@@ -1368,15 +1402,17 @@ class RayDAPOTrainer(RayPPOTrainer):
                         wrong_text = wrongs[j] if j < len(wrongs) else None
                         if not wrong_text:
                             raise ValueError("No wrong solution available for this sub-rollout slot.")
+                        part_response_ratio = sample_part_response_ratio()
                         ids, mask, pos, raw_ids, p_len = self._build_partial_inputs(
                             prompt_messages=prompt_messages,
                             wrong_text=wrong_text,
-                            part_response_ratio=sample_part_response_ratio(),
+                            part_response_ratio=part_response_ratio,
                             max_prompt_length=max_prompt_length,
                             truncation=truncation,
                             pad_token_id=pad_token_id,
                             apply_kwargs=apply_kwargs,
                         )
+                        part_response_ratio_samples.append(float(part_response_ratio))
                     else:
                         ids, mask, pos, raw_ids, p_len = self._build_token_prefixed_inputs(
                             prompt_messages=prompt_messages,
@@ -1512,6 +1548,19 @@ class RayDAPOTrainer(RayPPOTrainer):
         _metrics["denoise/sub_rollout/noise_source_random_tokens"] = float(
             noise_source == "random_tokens"
         )
+        if noise_source == "partial_wrong" and part_response_ratio_samples:
+            ratio_arr = np.asarray(part_response_ratio_samples, dtype=np.float32)
+            _metrics["denoise/sub_rollout/part_response_ratio_mean"] = float(
+                np.mean(ratio_arr)
+            )
+            _metrics["denoise/sub_rollout/part_response_ratio_min"] = float(
+                np.min(ratio_arr)
+            )
+            _metrics["denoise/sub_rollout/part_response_ratio_max"] = float(
+                np.max(ratio_arr)
+            )
+            if self._uses_dynamic_rho():
+                _metrics.update(self._get_dynamic_rho_controller().metrics())
         if noise_source == "random_tokens":
             _metrics["denoise/sub_rollout/random_noise_len_tokens"] = float(random_noise_len)
             _metrics["denoise/sub_rollout/random_noise_vocab_size"] = float(
