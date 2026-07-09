@@ -9,5 +9,6 @@ export noise_source=random_tokens
 export random_noise_len=${random_noise_len:-128}
 export random_noise_exclude_special=${random_noise_exclude_special:-True}
 export TRAIN_FILE=${TRAIN_FILE:-"./data/MATH7500-train.parquet"}
+export version="v2.0"
 
 exec bash "${SCRIPT_DIR}/denoise_qwen3-4b_v1.0.sh" "$@"

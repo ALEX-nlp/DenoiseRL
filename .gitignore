@@ -91,3 +91,6 @@ data_prepare_outputs/
 # Project-specific exports
 # ---------------------------------------------------------------------------
 readme.pdf
+
+
+data/*

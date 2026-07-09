@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export n_resp_per_prompt=${n_resp_per_prompt:-16}
 export sub_rollout_k=${sub_rollout_k:-0}
 export TRAIN_FILE=${TRAIN_FILE:-"./data/MATH7500-train.parquet"}
-export wandb_run_id=${wandb_run_id:-"8B-BASELINE_GRPO_v1.0_Qwen3-8B-Base_n${n_resp_per_prompt}"}
-export exp_name=${exp_name:-"8B-baseline-grpo-v1.0-model-Qwen3-8B-Base-lr-1e-6-bsz-16-n_resp-${n_resp_per_prompt}-mini-16"}
-
-exec bash "${SCRIPT_DIR}/denoise_qwen3-8b_v1.0.sh" "$@"
+export wandb_run_id=${wandb_run_id:-"2_BASELINE_GRPO_v1.0_Qwen3-4B-Base_n${n_resp_per_prompt}"}
+export exp_name=${exp_name:-"2_baseline-grpo-v1.0-model-Qwen3-4B-Base-lr-1e-6-bsz-16-n_resp-${n_resp_per_prompt}-mini-16"}
+exec bash "${SCRIPT_DIR}/denoise_qwen3-4b_v1.0.sh" "$@"
