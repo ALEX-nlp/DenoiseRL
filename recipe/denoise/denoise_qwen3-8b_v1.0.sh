@@ -100,7 +100,7 @@ use_same_uid=False
 model_name="Qwen3-8B-Base"
 offload=True
 ref_offload=True
-num_gpus=8
+num_gpus=4
 tensor_model_parallel_size=2
 
 # -----------------------------------------------------------------------------
