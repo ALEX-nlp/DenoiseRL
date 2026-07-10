@@ -56,7 +56,7 @@ part_response_ratio_high=${part_response_ratio_high:-0.8}
 #   recoverability = clip(acc_noise / acc_base, 0, 1)
 #   rho <- clip(rho + alpha * (recoverability - target), min, max)
 dynamic_rho_min=${dynamic_rho_min:-0.1}
-dynamic_rho_max=${dynamic_rho_max:-0.3}
+dynamic_rho_max=${dynamic_rho_max:-0.5}
 dynamic_rho_initial=${dynamic_rho_initial:-0.2}
 dynamic_rho_target_recoverability=${dynamic_rho_target_recoverability:-0.8}
 dynamic_rho_alpha=${dynamic_rho_alpha:-0.01}
