@@ -1,12 +1,14 @@
 """Feedback controller for dynamic DenoiseRL prefix ratio.
 
 The controller keeps one scalar ``rho`` and updates it from the observed
-``acc_base - acc_noise`` gap:
+recoverability of noisy rollouts:
 
-    rho <- clip(rho - alpha * (gap - target_gap), min_rho, max_rho)
+    recoverability = clip(acc_noise / acc_base, 0, 1)
+    rho <- clip(rho + alpha * (recoverability - target), min_rho, max_rho)
 
-When noisy rollouts are too hard, the gap is large and ``rho`` decreases. When
-the gap is smaller than the target, ``rho`` increases.
+When noisy rollouts retain less of the base accuracy than the target, ``rho``
+decreases. When they retain more, ``rho`` increases. If base accuracy is zero,
+recoverability is undefined and the update is skipped.
 """
 
 import math
@@ -20,7 +22,7 @@ class DynamicRhoController:
         min_rho: float = 0.1,
         max_rho: float = 0.5,
         initial_rho: float = 0.2,
-        target_gap: float = 0.1,
+        target_recoverability: float = 0.8,
         alpha: float = 0.05,
     ) -> None:
         self.min_rho = self._finite_float("dynamic_rho_min", min_rho)
@@ -39,10 +41,13 @@ class DynamicRhoController:
             )
         self.current_rho = initial
 
-        self.target_gap = self._finite_float("dynamic_rho_target_gap", target_gap)
-        if self.target_gap < 0.0:
+        self.target_recoverability = self._finite_float(
+            "dynamic_rho_target_recoverability", target_recoverability
+        )
+        if not (0.0 < self.target_recoverability <= 1.0):
             raise ValueError(
-                f"trainer.dynamic_rho_target_gap must be >= 0, got {self.target_gap}."
+                "trainer.dynamic_rho_target_recoverability must be in (0, 1], "
+                f"got {self.target_recoverability}."
             )
 
         self.alpha = self._finite_float("dynamic_rho_alpha", alpha)
@@ -52,7 +57,7 @@ class DynamicRhoController:
         self.num_updates = 0
         self.last_acc_base = None
         self.last_acc_noise = None
-        self.last_gap = None
+        self.last_recoverability = None
         self.last_error = None
         self.last_delta = 0.0
 
@@ -63,9 +68,7 @@ class DynamicRhoController:
             min_rho=cfg.get("dynamic_rho_min", 0.1),
             max_rho=cfg.get("dynamic_rho_max", 0.5),
             initial_rho=cfg.get("dynamic_rho_initial", 0.2),
-            target_gap=cfg.get(
-                "dynamic_rho_target_gap", cfg.get("dynamic_rho_target_diff", 0.1)
-            ),
+            target_recoverability=cfg.get("dynamic_rho_target_recoverability", 0.8),
             alpha=cfg.get("dynamic_rho_alpha", 0.05),
         )
 
@@ -86,21 +89,40 @@ class DynamicRhoController:
             metrics = self.metrics()
             metrics["denoise/dynamic_rho/update_applied"] = 0.0
             metrics["denoise/dynamic_rho/update_skipped_missing_acc"] = 1.0
+            metrics["denoise/dynamic_rho/update_skipped_zero_base"] = 0.0
             return metrics
 
         acc_base_f = self._finite_float("reward_model/acc_base", acc_base)
         acc_noise_f = self._finite_float("reward_model/acc_noise", acc_noise)
-        gap = acc_base_f - acc_noise_f
-        error = gap - self.target_gap
+        if not (0.0 <= acc_base_f <= 1.0):
+            raise ValueError(f"reward_model/acc_base must be in [0, 1], got {acc_base_f}.")
+        if not (0.0 <= acc_noise_f <= 1.0):
+            raise ValueError(f"reward_model/acc_noise must be in [0, 1], got {acc_noise_f}.")
+
+        if acc_base_f == 0.0:
+            metrics = self.metrics()
+            metrics.update(
+                {
+                    "denoise/dynamic_rho/update_applied": 0.0,
+                    "denoise/dynamic_rho/update_skipped_missing_acc": 0.0,
+                    "denoise/dynamic_rho/update_skipped_zero_base": 1.0,
+                    "denoise/dynamic_rho/acc_base": acc_base_f,
+                    "denoise/dynamic_rho/acc_noise": acc_noise_f,
+                }
+            )
+            return metrics
+
+        recoverability = min(1.0, max(0.0, acc_noise_f / acc_base_f))
+        error = recoverability - self.target_recoverability
         old_rho = self.current_rho
-        delta = -self.alpha * error
+        delta = self.alpha * error
         new_rho = min(self.max_rho, max(self.min_rho, old_rho + delta))
 
         self.current_rho = new_rho
         self.num_updates += 1
         self.last_acc_base = acc_base_f
         self.last_acc_noise = acc_noise_f
-        self.last_gap = gap
+        self.last_recoverability = recoverability
         self.last_error = error
         self.last_delta = new_rho - old_rho
 
@@ -109,10 +131,11 @@ class DynamicRhoController:
             {
                 "denoise/dynamic_rho/update_applied": 1.0,
                 "denoise/dynamic_rho/update_skipped_missing_acc": 0.0,
+                "denoise/dynamic_rho/update_skipped_zero_base": 0.0,
                 "denoise/dynamic_rho/acc_base": acc_base_f,
                 "denoise/dynamic_rho/acc_noise": acc_noise_f,
-                "denoise/dynamic_rho/acc_gap_base_minus_noise": gap,
-                "denoise/dynamic_rho/gap_error": error,
+                "denoise/dynamic_rho/recoverability": recoverability,
+                "denoise/dynamic_rho/recoverability_error": error,
                 "denoise/dynamic_rho/rho_before_update": old_rho,
                 "denoise/dynamic_rho/rho_after_update": new_rho,
                 "denoise/dynamic_rho/rho_update_delta": self.last_delta,
@@ -134,12 +157,12 @@ class DynamicRhoController:
             "denoise/dynamic_rho/current_rho": self.current_rho,
             "denoise/dynamic_rho/min_rho": self.min_rho,
             "denoise/dynamic_rho/max_rho": self.max_rho,
-            "denoise/dynamic_rho/target_gap": self.target_gap,
+            "denoise/dynamic_rho/target_recoverability": self.target_recoverability,
             "denoise/dynamic_rho/alpha": self.alpha,
             "denoise/dynamic_rho/num_updates": float(self.num_updates),
         }
-        if self.last_gap is not None:
-            out["denoise/dynamic_rho/last_acc_gap_base_minus_noise"] = self.last_gap
-            out["denoise/dynamic_rho/last_gap_error"] = self.last_error
+        if self.last_recoverability is not None:
+            out["denoise/dynamic_rho/last_recoverability"] = self.last_recoverability
+            out["denoise/dynamic_rho/last_recoverability_error"] = self.last_error
             out["denoise/dynamic_rho/last_rho_update_delta"] = self.last_delta
         return out

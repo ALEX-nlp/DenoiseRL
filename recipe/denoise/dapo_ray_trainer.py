@@ -405,7 +405,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 "[denoise] dynamic rho enabled: "
                 f"initial={dynamic_rho_controller.current_rho}, "
                 f"range=[{dynamic_rho_controller.min_rho}, {dynamic_rho_controller.max_rho}], "
-                f"target_gap={dynamic_rho_controller.target_gap}, "
+                f"target_recoverability={dynamic_rho_controller.target_recoverability}, "
                 f"alpha={dynamic_rho_controller.alpha}"
             )
 

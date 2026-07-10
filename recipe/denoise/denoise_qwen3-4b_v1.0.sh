@@ -41,7 +41,7 @@ random_noise_exclude_special=${random_noise_exclude_special:-True}
 #   * "normal"  - sample ratio ~ N(mean, std), then clip to
 #                 [part_response_ratio_low, part_response_ratio_high].
 #   * "uniform" - sample ratio ~ U(part_response_ratio_low, part_response_ratio_high).
-#   * "dynamic" - feedback-control rho from acc_base - acc_noise.
+#   * "dynamic" - feedback-control rho from acc_noise / acc_base recoverability.
 # Bounds must satisfy 0 < low <= high <= 1.
 part_response_ratio_strategy=${part_response_ratio_strategy:-"fixed"}   # "fixed" | "normal" | "uniform" | "dynamic"
 part_response_ratio_fixed=${part_response_ratio_fixed:-0.2}
@@ -51,12 +51,12 @@ part_response_ratio_low=${part_response_ratio_low:-0.2}
 part_response_ratio_high=${part_response_ratio_high:-0.8}
 
 # Dynamic rho controller. Used only when part_response_ratio_strategy="dynamic".
-# The controller targets acc_base - acc_noise ~= dynamic_rho_target_gap:
-#   rho <- clip(rho - alpha * ((acc_base - acc_noise) - target_gap), min, max)
+# The controller targets clipped acc_noise / acc_base recoverability:
+#   rho <- clip(rho + alpha * (recoverability - target), min, max)
 dynamic_rho_min=${dynamic_rho_min:-0.1}
 dynamic_rho_max=${dynamic_rho_max:-0.5}
 dynamic_rho_initial=${dynamic_rho_initial:-0.2}
-dynamic_rho_target_gap=${dynamic_rho_target_gap:-0.1}
+dynamic_rho_target_recoverability=${dynamic_rho_target_recoverability:-0.8}
 dynamic_rho_alpha=${dynamic_rho_alpha:-0.05}
 
 # Compact tag used in run/exp names so different strategies produce distinct ids.
@@ -71,7 +71,7 @@ case "${part_response_ratio_strategy}" in
         ratio_tag="uni-lo${part_response_ratio_low}-hi${part_response_ratio_high}"
         ;;
     dynamic)
-        ratio_tag="dyn-init${dynamic_rho_initial}-min${dynamic_rho_min}-max${dynamic_rho_max}-gap${dynamic_rho_target_gap}-alpha${dynamic_rho_alpha}"
+        ratio_tag="dyn-init${dynamic_rho_initial}-min${dynamic_rho_min}-max${dynamic_rho_max}-rec${dynamic_rho_target_recoverability}-alpha${dynamic_rho_alpha}"
         ;;
     *)
         echo "Unknown part_response_ratio_strategy: ${part_response_ratio_strategy}" >&2
@@ -265,7 +265,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise.main_dapo \
     +trainer.dynamic_rho_min=${dynamic_rho_min} \
     +trainer.dynamic_rho_max=${dynamic_rho_max} \
     +trainer.dynamic_rho_initial=${dynamic_rho_initial} \
-    +trainer.dynamic_rho_target_gap=${dynamic_rho_target_gap} \
+    +trainer.dynamic_rho_target_recoverability=${dynamic_rho_target_recoverability} \
     +trainer.dynamic_rho_alpha=${dynamic_rho_alpha} \
     +trainer.partial_mode=${partial_mode} \
     +trainer.use_problem_id_as_uid=${use_problem_id_as_uid} \
