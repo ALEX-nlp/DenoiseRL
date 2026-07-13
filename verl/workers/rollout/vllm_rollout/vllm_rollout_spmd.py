@@ -270,6 +270,8 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
+        model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        _monkey_patch_compute_logits(model, len(tokenizer))
 
     @contextmanager
     def update_sampling_params(self, **kwargs):

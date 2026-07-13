@@ -37,6 +37,7 @@ from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_b
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
+from verl.workers.actor.loss_aggregation import aggregation_mass, micro_batch_aggregation_scale
 from verl.workers.config import ActorConfig
 
 __all__ = ["DataParallelPPOActor"]
@@ -82,6 +83,43 @@ class DataParallelPPOActor(BasePPOActor):
             else entropy_from_logits
         )
         self.device_name = get_device_name()
+
+    @staticmethod
+    def _loss_group_keys(loss_group_id, sample_loss_multiplier: torch.Tensor) -> list[object]:
+        """Build stable per-row group keys for both explicit and legacy grouping."""
+        if loss_group_id is not None:
+            return [str(value) if value is not None else "__none__" for value in loss_group_id]
+        return [float(value) for value in sample_loss_multiplier.detach().cpu().tolist()]
+
+    @staticmethod
+    def _mask_aggregation_counts(loss_mask: torch.Tensor) -> tuple[float, float]:
+        token_count = float(loss_mask.detach().sum().item())
+        active_sequence_count = float((loss_mask.detach().sum(dim=-1) > 0).sum().item())
+        return token_count, active_sequence_count
+
+    @classmethod
+    def _mask_aggregation_mass(cls, loss_mask: torch.Tensor, loss_agg_mode: str) -> float:
+        token_count, active_sequence_count = cls._mask_aggregation_counts(loss_mask)
+        return aggregation_mass(
+            token_count=token_count,
+            active_sequence_count=active_sequence_count,
+            loss_agg_mode=loss_agg_mode,
+        )
+
+    @classmethod
+    def _micro_batch_aggregation_scale(
+        cls,
+        loss_mask: torch.Tensor,
+        global_mass: float,
+        loss_agg_mode: str,
+    ) -> float:
+        token_count, active_sequence_count = cls._mask_aggregation_counts(loss_mask)
+        return micro_batch_aggregation_scale(
+            local_token_count=token_count,
+            local_active_sequence_count=active_sequence_count,
+            global_mass=global_mass,
+            loss_agg_mode=loss_agg_mode,
+        )
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
@@ -385,6 +423,8 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys.append("loss_multiplier")
         if "loss_group_id" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("loss_group_id")
+        if "loss_group_normalizer" in data.non_tensor_batch.keys():
+            non_tensor_select_keys.append("loss_group_normalizer")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
@@ -404,6 +444,52 @@ class DataParallelPPOActor(BasePPOActor):
         metrics = {}
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
+                loss_agg_mode = self.config.loss_agg_mode
+                loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                # GSPO hard-codes sequence-mean-token-mean inside its policy
+                # loss implementation. Other policy losses use loss_agg_mode.
+                policy_loss_agg_mode = (
+                    "seq-mean-token-mean" if loss_mode == "gspo" else loss_agg_mode
+                )
+
+                # Record each loss group's aggregation denominator over the complete
+                # mini-batch before dynamic batching splits it. A token mean must be
+                # weighted by the micro-batch's share of trainable tokens, not rows.
+                mini_response_mask = mini_batch.batch["response_mask"]
+                mini_loss_multiplier = mini_batch.non_tensor_batch.get("loss_multiplier", None)
+                if mini_loss_multiplier is None:
+                    mini_multiplier_tensor = torch.ones(
+                        len(mini_batch), dtype=torch.float32, device=mini_response_mask.device
+                    )
+                elif torch.is_tensor(mini_loss_multiplier):
+                    mini_multiplier_tensor = mini_loss_multiplier.to(
+                        device=mini_response_mask.device, dtype=torch.float32
+                    )
+                else:
+                    mini_multiplier_tensor = torch.as_tensor(
+                        mini_loss_multiplier, device=mini_response_mask.device, dtype=torch.float32
+                    )
+                mini_group_keys = self._loss_group_keys(
+                    mini_batch.non_tensor_batch.get("loss_group_id", None),
+                    mini_multiplier_tensor.view(-1),
+                )
+                mini_groups: dict[object, list[int]] = {}
+                for row_idx, key in enumerate(mini_group_keys):
+                    mini_groups.setdefault(key, []).append(row_idx)
+
+                global_group_masses = {}
+                global_policy_group_masses = {}
+                mini_active_group_count = 0
+                for key, idx_list in mini_groups.items():
+                    idx = torch.as_tensor(idx_list, device=mini_response_mask.device, dtype=torch.long)
+                    group_mask = mini_response_mask.index_select(0, idx)
+                    if bool((group_mask.sum() > 0).item()):
+                        mini_active_group_count += 1
+                    global_group_masses[key] = self._mask_aggregation_mass(group_mask, loss_agg_mode)
+                    global_policy_group_masses[key] = self._mask_aggregation_mass(
+                        group_mask, policy_loss_agg_mode
+                    )
+
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -436,12 +522,10 @@ class DataParallelPPOActor(BasePPOActor):
                     sample_loss_multiplier = sample_loss_multiplier.detach().view(-1)
 
                     entropy_coeff = self.config.entropy_coeff
-                    loss_agg_mode = self.config.loss_agg_mode
 
-                    if self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / ppo_mini_batch_size
-                    else:
-                        loss_scale_factor = 1 / self.gradient_accumulation
+                    # Each group loss below is scaled into its exact contribution
+                    # to the complete mini-batch objective.
+                    loss_scale_factor = 1.0
 
                     # all return: (bsz, response_length)
                     calculate_entropy = False
@@ -460,7 +544,6 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             old_log_prob = model_inputs["old_log_probs"]
 
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
 
                     # Extract pre-computed rollout correction weights if present
@@ -477,71 +560,93 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
                     # Build per-row groups, then compute each group's expected loss
-                    # separately and take a multiplier-weighted sum:
-                    #     L = sum_g  mult_g * E_g[loss]
-                    # This realizes the "first take expectation per task, then sum"
-                    # objective, where `loss_multiplier` is the explicit weight on each
-                    # task's expectation rather than a per-token reweighting that ends
-                    # up sharing a single global denominator across all tasks.
+                    # separately and average the row-multiplier-weighted group
+                    # expectations. Splitting otherwise identical data into multiple
+                    # groups therefore does not change the total actor-loss scale.
                     #
                     # Grouping rules:
                     #   * When `loss_group_id` is present, group strictly by it
-                    #     (set by the trainer to e.g. "answer_pass1" / "hint_gen" /
-                    #     "main_rollout" / "sub_rollout"). The group's multiplier is
-                    #     taken from the first row of the group; the trainer is
-                    #     responsible for ensuring all rows sharing a `loss_group_id`
-                    #     also share the same `loss_multiplier`.
+                    #     (set by the trainer to e.g. "main_rollout" / "sub_rollout").
+                    #     `loss_multiplier` remains a per-row weight within the group.
                     #   * When `loss_group_id` is absent, fall back to grouping by
                     #     `loss_multiplier` value (preserves flows such as noise_learn
                     #     that only tag rows via multiplier).
                     loss_group_id = model_inputs.get("loss_group_id", None)
-                    mult_cpu = sample_loss_multiplier.detach().cpu().tolist()
+                    group_keys = self._loss_group_keys(loss_group_id, sample_loss_multiplier)
 
-                    # group key -> (list of row indices, group multiplier)
-                    groups: dict[object, tuple[list[int], float]] = {}
-                    if loss_group_id is not None:
-                        for i in range(len(mult_cpu)):
-                            gid = loss_group_id[i]
-                            key = str(gid) if gid is not None else "__none__"
-                            if key not in groups:
-                                groups[key] = ([], float(mult_cpu[i]))
-                            groups[key][0].append(i)
+                    # group key -> list of row indices
+                    groups: dict[object, list[int]] = {}
+                    for i, key in enumerate(group_keys):
+                        groups.setdefault(key, []).append(i)
+
+                    # Use a full-batch normalizer when supplied. Otherwise the number
+                    # of active groups in the complete mini-batch is the stable fallback;
+                    # using the per-micro-batch group count would make the loss depend on
+                    # how dynamic batching happened to partition the rows.
+                    global_normalizer_field = model_inputs.get("loss_group_normalizer", None)
+                    if global_normalizer_field is not None:
+                        if not torch.is_tensor(global_normalizer_field):
+                            global_normalizer_field = torch.as_tensor(
+                                global_normalizer_field,
+                                device=advantages.device,
+                                dtype=advantages.dtype,
+                            )
+                        else:
+                            global_normalizer_field = global_normalizer_field.to(
+                                device=advantages.device,
+                                dtype=advantages.dtype,
+                            )
+                        normalizer_val = float(global_normalizer_field.detach().view(-1)[0].item())
+                        loss_group_normalizer = (
+                            normalizer_val
+                            if normalizer_val > 0
+                            else float(max(mini_active_group_count, 1))
+                        )
                     else:
-                        for i, m in enumerate(mult_cpu):
-                            key = float(m)
-                            if key not in groups:
-                                groups[key] = ([], key)
-                            groups[key][0].append(i)
+                        loss_group_normalizer = float(max(mini_active_group_count, 1))
 
                     def _grouped_agg_loss(loss_mat: torch.Tensor) -> torch.Tensor:
-                        """sum_g mult_g * agg_loss(loss_mat[g], response_mask[g], loss_agg_mode)."""
+                        """Compose group aggregates into the complete mini-batch objective."""
                         total = torch.zeros((), device=loss_mat.device, dtype=loss_mat.dtype)
-                        for (idx_list, mult) in groups.values():
+                        for group_key, idx_list in groups.items():
                             if not idx_list:
                                 continue
                             g_idx = torch.as_tensor(idx_list, device=loss_mat.device, dtype=torch.long)
+                            g_multiplier = sample_loss_multiplier.index_select(0, g_idx).to(
+                                device=loss_mat.device,
+                                dtype=loss_mat.dtype,
+                            ).view(-1, 1)
                             group_val = agg_loss(
-                                loss_mat=loss_mat[g_idx],
+                                loss_mat=loss_mat[g_idx] * g_multiplier,
                                 loss_mask=response_mask[g_idx],
                                 loss_agg_mode=loss_agg_mode,
                             )
-                            total = total + float(mult) * group_val
-                        return total
+                            contribution_scale = self._micro_batch_aggregation_scale(
+                                response_mask[g_idx],
+                                global_mass=global_group_masses.get(group_key, 0.0),
+                                loss_agg_mode=loss_agg_mode,
+                            )
+                            total = total + group_val * contribution_scale
+                        return total / loss_group_normalizer
 
                     pg_loss = torch.zeros((), device=advantages.device, dtype=advantages.dtype)
                     # Aggregate per-group pg metrics (pg_clipfrac, ppo_kl, pg_clipfrac_lower)
                     # by token-count weighting so the logged values still equal the global
                     # batch-level metric (keeps dashboards comparable across the change).
                     pg_metrics_acc: dict[str, list[float]] = {}
-                    for (idx_list, mult) in groups.values():
+                    for group_key, idx_list in groups.items():
                         if not idx_list:
                             continue
                         g_idx = torch.as_tensor(idx_list, device=advantages.device, dtype=torch.long)
                         g_response_mask = response_mask[g_idx]
+                        g_multiplier = sample_loss_multiplier.index_select(0, g_idx).to(
+                            device=advantages.device,
+                            dtype=advantages.dtype,
+                        ).view(-1, 1)
                         group_pg_loss, group_pg_metrics = policy_loss_fn(
                             old_log_prob=old_log_prob[g_idx],
                             log_prob=log_prob[g_idx],
-                            advantages=advantages[g_idx],
+                            advantages=advantages[g_idx] * g_multiplier,
                             response_mask=g_response_mask,
                             loss_agg_mode=loss_agg_mode,
                             config=self.config,
@@ -549,11 +654,17 @@ class DataParallelPPOActor(BasePPOActor):
                                 rollout_is_weights[g_idx] if rollout_is_weights is not None else None
                             ),
                         )
-                        pg_loss = pg_loss + float(mult) * group_pg_loss
+                        contribution_scale = self._micro_batch_aggregation_scale(
+                            g_response_mask,
+                            global_mass=global_policy_group_masses.get(group_key, 0.0),
+                            loss_agg_mode=policy_loss_agg_mode,
+                        )
+                        pg_loss = pg_loss + group_pg_loss * contribution_scale
                         g_weight = float(g_response_mask.sum().detach().item())
                         for k, v in group_pg_metrics.items():
                             cum_sum, cum_w = pg_metrics_acc.get(k, [0.0, 0.0])
                             pg_metrics_acc[k] = [cum_sum + float(v) * g_weight, cum_w + g_weight]
+                    pg_loss = pg_loss / loss_group_normalizer
                     pg_metrics = {
                         k: (s / w if w > 0 else 0.0) for k, (s, w) in pg_metrics_acc.items()
                     }
