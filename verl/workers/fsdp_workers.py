@@ -232,7 +232,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # normalize config
         if self._is_actor:
-            self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
+            # ActorConfig.rollout_n normally mirrors rollout.n, but custom trainers
+            # may build a different number of trajectories (for example N + K
+            # denoise rollouts) while keeping rollout.n as the number of base rows.
+            actor_rollout_n = self.config.actor.get("rollout_n", self.config.rollout.n)
+            self.config.actor.ppo_mini_batch_size *= actor_rollout_n
             self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             assert self.config.actor.ppo_mini_batch_size > 0, (
                 f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after "

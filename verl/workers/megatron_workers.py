@@ -264,7 +264,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         # normalize config
         if self._is_actor and self._is_rollout:
-            self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
+            # ActorConfig.rollout_n normally mirrors rollout.n, but custom trainers
+            # may build a different number of trajectories (for example N + K
+            # denoise rollouts) while keeping rollout.n as the number of base rows.
+            actor_rollout_n = self.config.actor.get("rollout_n", self.config.rollout.n)
+            self.config.actor.ppo_mini_batch_size *= actor_rollout_n
             self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
             if self.config.actor.get("ppo_micro_batch_size", None):
                 self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()

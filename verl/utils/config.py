@@ -106,7 +106,8 @@ def validate_config(
             minimal_bsz = n_gpus
 
         # 1. Check total batch size for data correctness
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
+        actor_rollout_n = config.actor_rollout_ref.actor.get("rollout_n", config.actor_rollout_ref.rollout.n)
+        real_train_batch_size = config.data.train_batch_size * actor_rollout_n
         assert real_train_batch_size % minimal_bsz == 0, (
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size "
             f"({minimal_bsz})"

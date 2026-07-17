@@ -26,6 +26,11 @@ version="5_v1.0"
 #                 gets response_mask = 0; all R generated tokens preserved.
 n_resp_per_prompt=${n_resp_per_prompt:-0}
 sub_rollout_k=${sub_rollout_k:-16}
+effective_rollout_n=$((n_resp_per_prompt + sub_rollout_k))
+if (( effective_rollout_n <= 0 )); then
+    echo "n_resp_per_prompt + sub_rollout_k must be > 0, got ${effective_rollout_n}." >&2
+    exit 1
+fi
 partial_mode=cutdown
 noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
 random_noise_len=${random_noise_len:-512}
@@ -42,21 +47,27 @@ random_noise_exclude_special=${random_noise_exclude_special:-True}
 #                 [part_response_ratio_low, part_response_ratio_high].
 #   * "uniform" - sample ratio ~ U(part_response_ratio_low, part_response_ratio_high).
 #   * "dynamic" - feedback-control rho from acc_noise / acc_base recoverability.
+#   * "dynamic_acc" - feedback-control rho from current batch accuracy. This is the
+#                     denoise-only default because n_resp_per_prompt=0 means there
+#                     are no base rollouts for a recoverability ratio.
 # Bounds must satisfy 0 < low <= high <= 1.
-part_response_ratio_strategy=${part_response_ratio_strategy:-"fixed"}   # "fixed" | "normal" | "uniform" | "dynamic"
+part_response_ratio_strategy=${part_response_ratio_strategy:-"dynamic_acc"}   # "fixed" | "normal" | "uniform" | "dynamic" | "dynamic_acc"
 part_response_ratio_fixed=${part_response_ratio_fixed:-0.2}
 part_response_ratio_mean=${part_response_ratio_mean:-0.5}
 part_response_ratio_std=${part_response_ratio_std:-0.2}
 part_response_ratio_low=${part_response_ratio_low:-0.2}
 part_response_ratio_high=${part_response_ratio_high:-0.8}
 
-# Dynamic rho controller. Used only when part_response_ratio_strategy="dynamic".
-# The controller targets clipped acc_noise / acc_base recoverability:
-#   rho <- clip(rho + alpha * (recoverability - target), min, max)
-dynamic_rho_min=${dynamic_rho_min:-0.1}
+# Dynamic rho controller. ``dynamic_acc`` targets current-batch overall accuracy
+# and is suitable for denoise-only training:
+#   rho <- clip(rho + alpha * (batch_acc - target_acc), min, max)
+# Starting from rho=0 gives the model a clean first batch. If clean accuracy is
+# already below 0.75, rho remains clamped at zero instead of adding more noise.
+dynamic_rho_min=${dynamic_rho_min:-0.0}
 dynamic_rho_max=${dynamic_rho_max:-0.5}
-dynamic_rho_initial=${dynamic_rho_initial:-0.2}
+dynamic_rho_initial=${dynamic_rho_initial:-0.0}
 dynamic_rho_target_recoverability=${dynamic_rho_target_recoverability:-0.8}
+dynamic_rho_target_accuracy=${dynamic_rho_target_accuracy:-0.75}
 dynamic_rho_alpha=${dynamic_rho_alpha:-0.05}
 
 # Compact tag used in run/exp names so different strategies produce distinct ids.
@@ -72,6 +83,9 @@ case "${part_response_ratio_strategy}" in
         ;;
     dynamic)
         ratio_tag="dyn-init${dynamic_rho_initial}-min${dynamic_rho_min}-max${dynamic_rho_max}-rec${dynamic_rho_target_recoverability}-alpha${dynamic_rho_alpha}"
+        ;;
+    dynamic_acc|dynamic_accuracy)
+        ratio_tag="dynacc-init${dynamic_rho_initial}-min${dynamic_rho_min}-max${dynamic_rho_max}-target${dynamic_rho_target_accuracy}-alpha${dynamic_rho_alpha}"
         ;;
     *)
         echo "Unknown part_response_ratio_strategy: ${part_response_ratio_strategy}" >&2
@@ -189,6 +203,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise.main_dapo \
     data.val_batch_size=512 \
     data.return_raw_chat=True \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
+    actor_rollout_ref.actor.rollout_n=${effective_rollout_n} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
@@ -266,6 +281,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise.main_dapo \
     +trainer.dynamic_rho_max=${dynamic_rho_max} \
     +trainer.dynamic_rho_initial=${dynamic_rho_initial} \
     +trainer.dynamic_rho_target_recoverability=${dynamic_rho_target_recoverability} \
+    +trainer.dynamic_rho_target_accuracy=${dynamic_rho_target_accuracy} \
     +trainer.dynamic_rho_alpha=${dynamic_rho_alpha} \
     +trainer.partial_mode=${partial_mode} \
     +trainer.use_problem_id_as_uid=${use_problem_id_as_uid} \

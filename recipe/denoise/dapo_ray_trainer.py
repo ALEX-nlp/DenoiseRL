@@ -361,12 +361,25 @@ class RayDAPOTrainer(RayPPOTrainer):
         return str(self.config.trainer.get("part_response_ratio_strategy", "fixed")).lower()
 
     def _uses_dynamic_rho(self) -> bool:
-        return self._part_response_ratio_strategy() in ("dynamic", "dynamic_rho")
+        return self._part_response_ratio_strategy() in (
+            "dynamic",
+            "dynamic_rho",
+            "dynamic_acc",
+            "dynamic_accuracy",
+        )
+
+    def _dynamic_rho_feedback(self) -> str:
+        if self._part_response_ratio_strategy() in ("dynamic_acc", "dynamic_accuracy"):
+            return DynamicRhoController.ACCURACY
+        return DynamicRhoController.RECOVERABILITY
 
     def _get_dynamic_rho_controller(self) -> DynamicRhoController:
         controller = getattr(self, "_dynamic_rho_controller", None)
         if controller is None:
-            controller = DynamicRhoController.from_trainer_config(self.config.trainer)
+            controller = DynamicRhoController.from_trainer_config(
+                self.config.trainer,
+                feedback=self._dynamic_rho_feedback(),
+            )
             self._dynamic_rho_controller = controller
         return controller
 
@@ -401,11 +414,21 @@ class RayDAPOTrainer(RayPPOTrainer):
         dynamic_rho_controller = None
         if self._uses_dynamic_rho():
             dynamic_rho_controller = self._get_dynamic_rho_controller()
+            if dynamic_rho_controller.feedback == DynamicRhoController.ACCURACY:
+                target_description = (
+                    f"target_accuracy={dynamic_rho_controller.target_accuracy}"
+                )
+            else:
+                target_description = (
+                    "target_recoverability="
+                    f"{dynamic_rho_controller.target_recoverability}"
+                )
             pprint(
                 "[denoise] dynamic rho enabled: "
+                f"feedback={dynamic_rho_controller.feedback}, "
                 f"initial={dynamic_rho_controller.current_rho}, "
                 f"range=[{dynamic_rho_controller.min_rho}, {dynamic_rho_controller.max_rho}], "
-                f"target_recoverability={dynamic_rho_controller.target_recoverability}, "
+                f"{target_description}, "
                 f"alpha={dynamic_rho_controller.alpha}"
             )
 
@@ -579,10 +602,12 @@ class RayDAPOTrainer(RayPPOTrainer):
           * ``"normal"``  - draw from ``N(mean, std)`` then clip to
                             ``[low, high]``.
           * ``"uniform"`` - draw uniformly from ``[low, high]``.
-          * ``"dynamic"`` - use the feedback controller in ``dynamic_rho.py``.
+          * ``"dynamic"`` - control rho from noisy/base recoverability.
+          * ``"dynamic_acc"`` - control rho from current-batch overall accuracy; intended
+                                for denoise-only runs.
 
-        Bounds must satisfy ``0 < low <= high <= 1``. The returned ratio is always in
-        ``(0, 1]`` so downstream tokenization invariants (``cut >= 1``) hold.
+        Bounds for random strategies satisfy ``0 < low <= high <= 1``. Dynamic
+        strategies may return zero, which means an explicit no-prefix rollout.
         """
         cfg = self.config.trainer
         strategy = self._part_response_ratio_strategy()
@@ -604,14 +629,20 @@ class RayDAPOTrainer(RayPPOTrainer):
 
             return _sample_fixed
 
-        if strategy in ("dynamic", "dynamic_rho"):
+        if strategy in (
+            "dynamic",
+            "dynamic_rho",
+            "dynamic_acc",
+            "dynamic_accuracy",
+        ):
             controller = self._get_dynamic_rho_controller()
             return controller.sample
 
         if strategy not in ("normal", "uniform"):
             raise ValueError(
                 "trainer.part_response_ratio_strategy must be one of "
-                f"'fixed' | 'normal' | 'uniform' | 'dynamic', got {strategy!r}."
+                "'fixed' | 'normal' | 'uniform' | 'dynamic' | 'dynamic_acc', "
+                f"got {strategy!r}."
             )
 
         low = _coerce_ratio("part_response_ratio_low", cfg.get("part_response_ratio_low", 0.1))
@@ -1347,6 +1378,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # Metrics for the sub-rollout planning step.
         n_sub_rows_with_prefix = 0
+        n_sub_rows_zero_noise = 0
         n_sub_rows_fallback = 0
         sum_partial_lens = 0
         max_observed_partial = 0
@@ -1399,10 +1431,29 @@ class RayDAPOTrainer(RayPPOTrainer):
             for j in range(k):
                 try:
                     if noise_source == "partial_wrong":
+                        part_response_ratio = sample_part_response_ratio()
+                        part_response_ratio_samples.append(float(part_response_ratio))
+
+                        # ``dynamic_acc`` deliberately starts at rho=0. In that state
+                        # a sub slot is a clean rollout, not an error fallback. Once
+                        # accuracy rises above target, the controller increases rho and
+                        # subsequent slots begin receiving a wrong-solution prefix.
+                        if part_response_ratio == 0.0:
+                            flat_input_ids_rows.append(base_input_ids[b : b + 1])
+                            flat_attention_mask_rows.append(base_attention_mask[b : b + 1])
+                            flat_position_ids_rows.append(base_position_ids[b : b + 1])
+                            flat_raw_prompt_ids.append(
+                                list(base_raw_prompt_ids[b])
+                                if base_raw_prompt_ids is not None
+                                else []
+                            )
+                            partial_lens_flat.append(0)
+                            n_sub_rows_zero_noise += 1
+                            continue
+
                         wrong_text = wrongs[j] if j < len(wrongs) else None
                         if not wrong_text:
                             raise ValueError("No wrong solution available for this sub-rollout slot.")
-                        part_response_ratio = sample_part_response_ratio()
                         ids, mask, pos, raw_ids, p_len = self._build_partial_inputs(
                             prompt_messages=prompt_messages,
                             wrong_text=wrong_text,
@@ -1412,7 +1463,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                             pad_token_id=pad_token_id,
                             apply_kwargs=apply_kwargs,
                         )
-                        part_response_ratio_samples.append(float(part_response_ratio))
                     else:
                         ids, mask, pos, raw_ids, p_len = self._build_token_prefixed_inputs(
                             prompt_messages=prompt_messages,
@@ -1539,6 +1589,7 @@ class RayDAPOTrainer(RayPPOTrainer):
         _metrics["denoise/sub_rollout/n_main_rows"] = float(B * n)
         _metrics["denoise/sub_rollout/n_sub_rows_planned"] = float(B * k)
         _metrics["denoise/sub_rollout/n_sub_rows_with_prefix"] = float(n_sub_rows_with_prefix)
+        _metrics["denoise/sub_rollout/n_sub_rows_zero_noise"] = float(n_sub_rows_zero_noise)
         _metrics["denoise/sub_rollout/n_sub_rows_fallback"] = float(n_sub_rows_fallback)
         _metrics["denoise/sub_rollout/n_problems_without_wrongs"] = float(problems_without_wrongs)
         _metrics["denoise/sub_rollout/max_partial_len"] = float(max_partial_len)
