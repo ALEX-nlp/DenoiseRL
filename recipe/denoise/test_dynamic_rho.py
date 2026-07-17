@@ -52,11 +52,15 @@ class DynamicRhoControllerTest(unittest.TestCase):
             alpha=0.05,
         )
 
-        metrics = controller.update_from_metrics({"reward_model/acc": 0.95})
+        metrics = controller.update_from_metrics(
+            {"reward_model/acc": 0.95, "reward_model/acc_noise": 0.0}
+        )
 
         self.assertAlmostEqual(controller.current_rho, 0.01)
         self.assertAlmostEqual(metrics["denoise/dynamic_rho/batch_accuracy"], 0.95)
         self.assertAlmostEqual(metrics["denoise/dynamic_rho/accuracy_error"], 0.2)
+        self.assertEqual(metrics["denoise/dynamic_rho/accuracy_source_is_noise"], 0.0)
+        self.assertEqual(metrics["denoise/dynamic_rho/zero_rho_uses_overall_acc"], 1.0)
 
     def test_accuracy_feedback_decreases_immediately_below_target(self):
         controller = DynamicRhoController(
@@ -85,17 +89,56 @@ class DynamicRhoControllerTest(unittest.TestCase):
         self.assertEqual(controller.current_rho, 0.0)
         self.assertEqual(metrics["denoise/dynamic_rho/rho_update_delta"], 0.0)
 
-    def test_accuracy_feedback_does_not_require_base_or_noise_accuracy(self):
+    def test_positive_rho_uses_noise_accuracy_instead_of_overall_accuracy(self):
         controller = DynamicRhoController(
             min_rho=0.0,
-            initial_rho=0.0,
+            initial_rho=0.2,
+            feedback=DynamicRhoController.ACCURACY,
+            target_accuracy=0.75,
+            alpha=0.05,
+        )
+
+        metrics = controller.update_from_metrics(
+            {"reward_model/acc": 0.95, "reward_model/acc_noise": 0.55}
+        )
+
+        self.assertEqual(metrics["denoise/dynamic_rho/update_applied"], 1.0)
+        self.assertAlmostEqual(metrics["denoise/dynamic_rho/batch_accuracy"], 0.55)
+        self.assertAlmostEqual(controller.current_rho, 0.19)
+        self.assertEqual(metrics["denoise/dynamic_rho/accuracy_source_is_noise"], 1.0)
+
+    def test_positive_rho_skips_update_when_noise_accuracy_is_missing(self):
+        controller = DynamicRhoController(
+            min_rho=0.0,
+            initial_rho=0.2,
             feedback=DynamicRhoController.ACCURACY,
         )
 
-        metrics = controller.update_from_metrics({"reward_model/acc": 0.8})
+        metrics = controller.update_from_metrics({"reward_model/acc": 0.95})
 
-        self.assertEqual(metrics["denoise/dynamic_rho/update_applied"], 1.0)
-        self.assertEqual(metrics["denoise/dynamic_rho/feedback_is_accuracy"], 1.0)
+        self.assertEqual(controller.current_rho, 0.2)
+        self.assertEqual(metrics["denoise/dynamic_rho/update_applied"], 0.0)
+        self.assertEqual(
+            metrics["denoise/dynamic_rho/update_skipped_missing_noise_acc"], 1.0
+        )
+
+    def test_uses_overall_accuracy_again_after_rho_returns_to_zero(self):
+        controller = DynamicRhoController(
+            min_rho=0.0,
+            initial_rho=0.01,
+            feedback=DynamicRhoController.ACCURACY,
+            target_accuracy=0.75,
+            alpha=0.05,
+        )
+        controller.update_from_metrics(
+            {"reward_model/acc": 0.0, "reward_model/acc_noise": 0.0}
+        )
+        self.assertEqual(controller.current_rho, 0.0)
+
+        metrics = controller.update_from_metrics({"reward_model/acc": 0.95})
+
+        self.assertAlmostEqual(controller.current_rho, 0.01)
+        self.assertEqual(metrics["denoise/dynamic_rho/zero_rho_uses_overall_acc"], 1.0)
 
     def test_accuracy_config_defaults_allow_zero_rho(self):
         controller = DynamicRhoController.from_trainer_config(

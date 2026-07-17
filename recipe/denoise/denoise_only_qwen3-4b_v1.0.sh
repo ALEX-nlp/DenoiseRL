@@ -58,11 +58,12 @@ part_response_ratio_std=${part_response_ratio_std:-0.2}
 part_response_ratio_low=${part_response_ratio_low:-0.2}
 part_response_ratio_high=${part_response_ratio_high:-0.8}
 
-# Dynamic rho controller. ``dynamic_acc`` targets current-batch overall accuracy
-# and is suitable for denoise-only training:
-#   rho <- clip(rho + alpha * (batch_acc - target_acc), min, max)
-# Starting from rho=0 gives the model a clean first batch. If clean accuracy is
-# already below 0.75, rho remains clamped at zero instead of adding more noise.
+# Dynamic rho controller for denoise-only training. It uses overall accuracy at
+# rho=0 (where no noisy rows exist), and noisy-row accuracy once rho is positive:
+#   feedback_acc = acc if rho == 0 else acc_noise
+#   rho <- clip(rho + alpha * (feedback_acc - target_acc), min, max)
+# Starting from rho=0 gives the model a clean first batch. The same rule applies
+# whenever rho later falls back to zero.
 dynamic_rho_min=${dynamic_rho_min:-0.0}
 dynamic_rho_max=${dynamic_rho_max:-0.5}
 dynamic_rho_initial=${dynamic_rho_initial:-0.0}

@@ -171,12 +171,13 @@ def problem_id_avg_acc_distribution_metrics(problem_id_to_avg_acc: dict) -> dict
     return out
 
 
-def compute_rollout_type_acc_metrics(batch: DataProto) -> dict:
-    """Mean verifier acc split by base vs noisy rollout rows.
+def compute_rollout_type_acc_metrics(batch: DataProto, *, denoise_only: bool = False) -> dict:
+    """Mean verifier acc split by clean/base vs noisy rollout rows.
 
     Rows with ``partial_response_len > 0`` are noisy rollouts; rows with
-    ``partial_response_len == 0`` are base/main rollouts, including fallback sub slots
-    where no noisy prefix was attached.
+    ``partial_response_len == 0`` are clean rows. In a mixed main+sub run the clean
+    metric is named ``acc_base``; in denoise-only it is named ``acc_clean`` because
+    these are rho=0 or fallback sub slots, not base rollouts.
     """
     acc_vals = batch.non_tensor_batch.get("acc", None)
     if acc_vals is None:
@@ -197,10 +198,11 @@ def compute_rollout_type_acc_metrics(batch: DataProto) -> dict:
 
     finite = np.isfinite(acc_arr)
     metrics = {}
-    base_acc = acc_arr[finite & (partial_arr == 0)]
+    clean_acc = acc_arr[finite & (partial_arr == 0)]
     noise_acc = acc_arr[finite & (partial_arr > 0)]
-    if base_acc.size > 0:
-        metrics["reward_model/acc_base"] = float(np.mean(base_acc))
+    if clean_acc.size > 0:
+        clean_key = "reward_model/acc_clean" if denoise_only else "reward_model/acc_base"
+        metrics[clean_key] = float(np.mean(clean_acc))
     if noise_acc.size > 0:
         metrics["reward_model/acc_noise"] = float(np.mean(noise_acc))
     return metrics
@@ -562,7 +564,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                     acc_finite = acc_vals[np.isfinite(acc_vals)]
                     if acc_finite.size > 0:
                         metrics["reward_model/acc"] = float(np.mean(acc_finite))
-                    metrics.update(compute_rollout_type_acc_metrics(batch))
+                    n_main_rollouts = int(self.config.actor_rollout_ref.rollout.n)
+                    metrics.update(
+                        compute_rollout_type_acc_metrics(
+                            batch,
+                            denoise_only=(n_main_rollouts == 0),
+                        )
+                    )
 
                 if dynamic_rho_controller is not None:
                     metrics.update(dynamic_rho_controller.update_from_metrics(metrics))

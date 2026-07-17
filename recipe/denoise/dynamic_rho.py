@@ -7,9 +7,9 @@ Two feedback signals are supported:
     rollouts in a batch.
 
 ``accuracy`` (``dynamic_acc`` strategy)
-    The current batch's overall verifier accuracy. This is intended for
-    denoise-only runs, where there are no base rollouts to form a recoverability
-    ratio.
+    The current batch's verifier accuracy on rows that actually received noise.
+    Whenever ``rho=0``, overall batch accuracy is used because no noisy rows can
+    exist; at ``rho>0``, a batch without noisy rows is skipped.
 
 For either signal, larger-than-target feedback increases ``rho`` (more noise),
 and smaller-than-target feedback decreases it::
@@ -189,12 +189,15 @@ class DynamicRhoController:
         )
         return metrics
 
-    def update_from_accuracy(self, batch_accuracy) -> dict:
-        """Update rho directly from the current batch's overall accuracy."""
+    def update_from_accuracy(self, batch_accuracy, *, zero_rho_overall: bool = False) -> dict:
+        """Update rho from noisy accuracy, or overall accuracy when rho is zero."""
         if batch_accuracy is None:
             return self._skipped_metrics("missing_acc")
 
-        batch_accuracy_f = self._validate_accuracy("reward_model/acc", batch_accuracy)
+        metric_name = (
+            "reward_model/acc" if zero_rho_overall else "reward_model/acc_noise"
+        )
+        batch_accuracy_f = self._validate_accuracy(metric_name, batch_accuracy)
         old_rho, new_rho, error = self._apply_feedback(
             batch_accuracy_f, self.target_accuracy
         )
@@ -206,7 +209,14 @@ class DynamicRhoController:
                 "denoise/dynamic_rho/update_applied": 1.0,
                 "denoise/dynamic_rho/update_skipped_missing_acc": 0.0,
                 "denoise/dynamic_rho/update_skipped_zero_base": 0.0,
+                "denoise/dynamic_rho/update_skipped_missing_noise_acc": 0.0,
                 "denoise/dynamic_rho/batch_accuracy": batch_accuracy_f,
+                "denoise/dynamic_rho/accuracy_source_is_noise": float(
+                    not zero_rho_overall
+                ),
+                "denoise/dynamic_rho/zero_rho_uses_overall_acc": float(
+                    zero_rho_overall
+                ),
                 "denoise/dynamic_rho/accuracy_error": error,
                 "denoise/dynamic_rho/rho_before_update": old_rho,
                 "denoise/dynamic_rho/rho_after_update": new_rho,
@@ -218,7 +228,26 @@ class DynamicRhoController:
     def update_from_metrics(self, metrics: dict) -> dict:
         """Update rho using metrics emitted by the trainer."""
         if self.feedback == self.ACCURACY:
-            return self.update_from_accuracy(metrics.get("reward_model/acc"))
+            # At rho=0 there cannot be an acc_noise measurement. Use overall acc
+            # whenever the controller is at that boundary, including if training
+            # later drives rho back to zero.
+            if self.current_rho == 0.0:
+                overall_accuracy = metrics.get("reward_model/acc")
+                if overall_accuracy is not None:
+                    return self.update_from_accuracy(
+                        overall_accuracy, zero_rho_overall=True
+                    )
+            else:
+                noise_accuracy = metrics.get("reward_model/acc_noise")
+                if noise_accuracy is not None:
+                    return self.update_from_accuracy(noise_accuracy)
+
+            skipped = self._skipped_metrics("missing_acc")
+            skipped["denoise/dynamic_rho/update_skipped_missing_noise_acc"] = float(
+                self.current_rho > 0.0
+            )
+            skipped["denoise/dynamic_rho/zero_rho_uses_overall_acc"] = 0.0
+            return skipped
         return self.update_from_acc(
             metrics.get("reward_model/acc_base"),
             metrics.get("reward_model/acc_noise"),
