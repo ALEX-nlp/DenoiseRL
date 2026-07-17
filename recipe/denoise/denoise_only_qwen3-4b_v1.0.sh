@@ -24,8 +24,8 @@ version="5_v1.0"
 #   * "none"    - response width = R + max_partial_len; NO truncation (per-row
 #                 output is p_i + R; NOT length-fair vs main rollouts). noisy_prefix
 #                 gets response_mask = 0; all R generated tokens preserved.
-n_resp_per_prompt=${n_resp_per_prompt:-12}
-sub_rollout_k=${sub_rollout_k:-4}
+n_resp_per_prompt=${n_resp_per_prompt:-0}
+sub_rollout_k=${sub_rollout_k:-16}
 partial_mode=cutdown
 noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
 random_noise_len=${random_noise_len:-512}
@@ -120,7 +120,7 @@ tensor_model_parallel_size=1
 # Training schedule
 # -----------------------------------------------------------------------------
 epoch=1000
-project_name='V1.0 Denoise 4B'
+project_name='V2.0 Denoise 4B'
 
 lr_warmup_steps=0
 lr=1e-6
