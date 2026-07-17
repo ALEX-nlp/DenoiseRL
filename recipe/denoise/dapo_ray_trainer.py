@@ -66,6 +66,7 @@ from tqdm import tqdm
 
 import verl.utils.torch_functional as verl_F
 from recipe.denoise.dynamic_rho import DynamicRhoController
+from recipe.denoise.noise_metrics import compute_paired_noise_acc_metrics
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
@@ -571,6 +572,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                             denoise_only=(n_main_rollouts == 0),
                         )
                     )
+                    metrics.update(compute_paired_noise_acc_metrics(batch))
 
                 if dynamic_rho_controller is not None:
                     metrics.update(dynamic_rho_controller.update_from_metrics(metrics))
