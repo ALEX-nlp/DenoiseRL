@@ -8,8 +8,9 @@ version="6_v4.0"
 # -----------------------------------------------------------------------------
 # Each prompt produces N "main" rollouts and K "sub" rollouts. Sub rollouts use
 # ``noise_source`` to choose the noisy assistant prefix before the model response:
-#   * "partial_wrong" - first ``part_response_ratio`` (by tokens) of a row drawn
-#                       from ``wrong_answer_with_boxed``.
+#   * "partial_wrong" - a ``part_response_ratio`` prefix of a row drawn from
+#                       ``wrong_answer_with_boxed``. ``partial_wrong_cut_strategy``
+#                       controls whether the ratio lands on a token or line boundary.
 #   * "random_tokens" - ``random_noise_len`` random tokenizer ids sampled from
 #                       the tokenizer vocabulary.
 # After rollout the noisy prefix is folded into the response window per
@@ -30,6 +31,19 @@ partial_mode=cutdown
 noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
 random_noise_len=${random_noise_len:-512}
 random_noise_exclude_special=${random_noise_exclude_special:-True}
+partial_wrong_cut_strategy=${partial_wrong_cut_strategy:-token}  # "token" | "line"
+case "${partial_wrong_cut_strategy}" in
+    token)
+        partial_wrong_cut_tag=""
+        ;;
+    line)
+        partial_wrong_cut_tag="-cut-line"
+        ;;
+    *)
+        echo "Unknown partial_wrong_cut_strategy: ${partial_wrong_cut_strategy}" >&2
+        exit 1
+        ;;
+esac
 
 # -----------------------------------------------------------------------------
 # part_response_ratio sampling strategy
@@ -81,9 +95,9 @@ esac
 
 case "${noise_source}" in
     partial_wrong)
-        noise_run_tag="${ratio_tag}"
+        noise_run_tag="${ratio_tag}${partial_wrong_cut_tag}"
         noise_source_tag="partial_wrong"
-        noise_exp_tag="partial-wrong-k-${sub_rollout_k}-ratio-${ratio_tag}"
+        noise_exp_tag="partial-wrong-k-${sub_rollout_k}-ratio-${ratio_tag}${partial_wrong_cut_tag}"
         ;;
     random_tokens)
         noise_run_tag="random-tokens-len${random_noise_len}"
@@ -254,6 +268,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise.main_dapo \
     +trainer.max_actor_ckpt_to_keep=1 \
     +trainer.sub_rollout_k=${sub_rollout_k} \
     +trainer.noise_source=${noise_source} \
+    +trainer.partial_wrong_cut_strategy=${partial_wrong_cut_strategy} \
     +trainer.random_noise_len=${random_noise_len} \
     +trainer.random_noise_exclude_special=${random_noise_exclude_special} \
     +trainer.part_response_ratio_strategy=${part_response_ratio_strategy} \

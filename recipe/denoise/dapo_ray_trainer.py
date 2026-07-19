@@ -67,6 +67,7 @@ from tqdm import tqdm
 import verl.utils.torch_functional as verl_F
 from recipe.denoise.dynamic_rho import DynamicRhoController
 from recipe.denoise.noise_metrics import compute_paired_noise_acc_metrics
+from recipe.denoise.prefix_cut import cut_wrong_solution_prefix
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
@@ -915,31 +916,36 @@ class RayDAPOTrainer(RayPPOTrainer):
         truncation: str,
         pad_token_id: int,
         apply_kwargs: dict,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, int]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, int, float, bool]:
         """
-        Render a prompt where the assistant message is the first ``part_response_ratio``
-        (by tokens) of ``wrong_text``. The rendering uses ``continue_final_message=True``
-        so the model continues writing directly from the partial prefix.
+        Render a prompt where the assistant message is a prefix of ``wrong_text``.
+        ``trainer.partial_wrong_cut_strategy`` controls whether the requested token
+        ratio is cut exactly (``"token"``) or rounded to the nearest complete line
+        ending (``"line"``).
 
         Returns:
-            (input_ids[1, P], attention_mask[1, P], position_ids[1, P], raw_prompt_ids, partial_token_len)
+            (input_ids[1, P], attention_mask[1, P], position_ids[1, P],
+             raw_prompt_ids, partial_token_len, realized_ratio, used_line_boundary)
             where ``P = max_prompt_length`` (left-padded).
         """
-        # Cut the wrong solution to the first part_response_ratio of its tokens.
-        wrong_token_ids = self.tokenizer.encode(wrong_text, add_special_tokens=False)
-        if not wrong_token_ids:
-            raise ValueError("Empty wrong solution after tokenization.")
-        cut = int(len(wrong_token_ids) * part_response_ratio)
-        cut = max(1, min(cut, len(wrong_token_ids)))
-        partial_text = self.tokenizer.decode(wrong_token_ids[:cut], skip_special_tokens=True)
-        return self._build_text_prefixed_inputs(
+        cut_strategy = str(
+            self.config.trainer.get("partial_wrong_cut_strategy", "token")
+        ).lower()
+        prefix_cut = cut_wrong_solution_prefix(
+            tokenizer=self.tokenizer,
+            text=wrong_text,
+            ratio=part_response_ratio,
+            strategy=cut_strategy,
+        )
+        built = self._build_text_prefixed_inputs(
             prompt_messages=prompt_messages,
-            prefix_text=partial_text,
+            prefix_text=prefix_cut.text,
             max_prompt_length=max_prompt_length,
             truncation=truncation,
             pad_token_id=pad_token_id,
             apply_kwargs=apply_kwargs,
         )
+        return (*built, prefix_cut.realized_ratio, prefix_cut.used_line_boundary)
 
     def _fold_partial_into_response(
         self,
@@ -1324,6 +1330,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                 "trainer.noise_source must be 'partial_wrong' or 'random_tokens', "
                 f"got {noise_source!r}."
             )
+        partial_wrong_cut_strategy = str(
+            self.config.trainer.get("partial_wrong_cut_strategy", "token")
+        ).lower()
+        if partial_wrong_cut_strategy not in ("token", "line"):
+            raise ValueError(
+                "trainer.partial_wrong_cut_strategy must be 'token' or 'line', "
+                f"got {partial_wrong_cut_strategy!r}."
+            )
 
         # Sub-rollouts draw a fresh prefix per slot. Partial-wrong uses the existing
         # token-ratio sampler; random-tokens samples tokenizer ids directly.
@@ -1394,6 +1408,9 @@ class RayDAPOTrainer(RayPPOTrainer):
         max_observed_partial = 0
         problems_without_wrongs = 0
         part_response_ratio_samples: List[float] = []
+        realized_part_response_ratio_samples: List[float] = []
+        n_line_boundary_prefixes = 0
+        n_line_boundary_fallbacks = 0
 
         for b in range(B):
             # N main rollouts: reuse the dataloader tokenization.
@@ -1464,7 +1481,15 @@ class RayDAPOTrainer(RayPPOTrainer):
                         wrong_text = wrongs[j] if j < len(wrongs) else None
                         if not wrong_text:
                             raise ValueError("No wrong solution available for this sub-rollout slot.")
-                        ids, mask, pos, raw_ids, p_len = self._build_partial_inputs(
+                        (
+                            ids,
+                            mask,
+                            pos,
+                            raw_ids,
+                            p_len,
+                            realized_part_response_ratio,
+                            used_line_boundary,
+                        ) = self._build_partial_inputs(
                             prompt_messages=prompt_messages,
                             wrong_text=wrong_text,
                             part_response_ratio=part_response_ratio,
@@ -1473,6 +1498,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                             pad_token_id=pad_token_id,
                             apply_kwargs=apply_kwargs,
                         )
+                        realized_part_response_ratio_samples.append(
+                            float(realized_part_response_ratio)
+                        )
+                        if partial_wrong_cut_strategy == "line":
+                            if used_line_boundary:
+                                n_line_boundary_prefixes += 1
+                            else:
+                                n_line_boundary_fallbacks += 1
                     else:
                         ids, mask, pos, raw_ids, p_len = self._build_token_prefixed_inputs(
                             prompt_messages=prompt_messages,
@@ -1619,6 +1652,25 @@ class RayDAPOTrainer(RayPPOTrainer):
             )
             _metrics["denoise/sub_rollout/part_response_ratio_max"] = float(
                 np.max(ratio_arr)
+            )
+            if realized_part_response_ratio_samples:
+                realized_ratio_arr = np.asarray(
+                    realized_part_response_ratio_samples, dtype=np.float32
+                )
+                _metrics[
+                    "denoise/sub_rollout/realized_part_response_ratio_mean"
+                ] = float(np.mean(realized_ratio_arr))
+                _metrics[
+                    "denoise/sub_rollout/realized_part_response_ratio_min"
+                ] = float(np.min(realized_ratio_arr))
+                _metrics[
+                    "denoise/sub_rollout/realized_part_response_ratio_max"
+                ] = float(np.max(realized_ratio_arr))
+            _metrics["denoise/sub_rollout/n_line_boundary_prefixes"] = float(
+                n_line_boundary_prefixes
+            )
+            _metrics["denoise/sub_rollout/n_line_boundary_fallbacks"] = float(
+                n_line_boundary_fallbacks
             )
             if self._uses_dynamic_rho():
                 _metrics.update(self._get_dynamic_rho_controller().metrics())
