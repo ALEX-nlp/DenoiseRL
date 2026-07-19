@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 export WANDB_MODE=offline
-version="5_v1.0"
+version="6_v4.0"
 
 # -----------------------------------------------------------------------------
 # denoise specific knobs
@@ -120,7 +120,7 @@ tensor_model_parallel_size=1
 # Training schedule
 # -----------------------------------------------------------------------------
 epoch=1000
-project_name='V1.0 Denoise 4B'
+project_name='V2.0 Denoise 4B'
 
 lr_warmup_steps=0
 lr=1e-6
