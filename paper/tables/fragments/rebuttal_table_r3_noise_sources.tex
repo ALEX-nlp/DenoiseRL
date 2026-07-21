@@ -1,0 +1,14 @@
+\begin{minipage}{\TableWidth}
+\centering
+\small
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrrrrr@{}}
+\toprule
+Training strategy & MATH500 & AMC23 & AIME2024 & AIME2025 & BBEH & Average \\
+\midrule
+GRPO (no denoise prefix)      & 83.6 & 63.1 & 22.1 & 18.1 & 11.1 & 39.6 \\
+DenoiseRL: small weak model   & 85.8 & 61.4 & \best{24.8} & \best{23.3} & \best{14.8} & \best{42.0} \\
+DenoiseRL: frozen pre-RL self & \best{86.2} & \best{65.2} & 21.0 & 22.4 & 12.2 & 41.4 \\
+DenoiseRL: random-token noise & 84.6 & 63.8 & 20.8 & 20.8 & 11.5 & 40.3 \\
+\bottomrule
+\end{tabular*}
+\end{minipage}

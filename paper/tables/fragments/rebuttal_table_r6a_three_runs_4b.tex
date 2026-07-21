@@ -1,0 +1,19 @@
+\begin{minipage}{\TableWidth}
+\centering
+\footnotesize
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}llrrrrrr@{}}
+\toprule
+Method & Run & MATH500 & AMC23 & AIME2024 & AIME2025 & BBEH & Average \\
+\midrule
+GRPO & Original      & 83.6 & 63.1 & 22.1 & 18.1 & 11.1 & 39.6 \\
+GRPO & New run 2     & 86.0 & 63.1 & 20.4 & 18.1 & 11.3 & 39.8 \\
+GRPO & New run 3     & 85.2 & 65.9 & 19.2 & 17.9 & 12.0 & 40.0 \\
+GRPO & Mean $\pm$ std. & 84.9 $\pm$ 1.2 & \best{64.0 $\pm$ 1.6} & 20.6 $\pm$ 1.5 & 18.0 $\pm$ 0.1 & 11.5 $\pm$ 0.5 & 39.8 $\pm$ 0.2 \\
+\midrule
+DenoiseRL-GRPO & Original      & 85.8 & 61.4 & 24.8 & 23.3 & 14.8 & 42.0 \\
+DenoiseRL-GRPO & New run 2     & 86.0 & 65.3 & 23.3 & 21.9 & 13.3 & 42.0 \\
+DenoiseRL-GRPO & New run 3     & 85.8 & 64.8 & 24.2 & 22.3 & 11.5 & 41.7 \\
+DenoiseRL-GRPO & Mean $\pm$ std. & \best{85.9 $\pm$ 0.1} & 63.8 $\pm$ 2.1 & \best{24.1 $\pm$ 0.8} & \best{22.5 $\pm$ 0.7} & \best{13.2 $\pm$ 1.7} & \best{41.9 $\pm$ 0.2} \\
+\bottomrule
+\end{tabular*}
+\end{minipage}

@@ -1,0 +1,21 @@
+\begin{minipage}{\TableWidth}
+\centering
+\small
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}llrrr@{}}
+\toprule
+Noise source & Stage (steps) & \texttt{acc\_base} (\%) & \texttt{acc\_noise} (\%) & Recovery gap (pp) \\
+\midrule
+Small weak model   & Early (1--400)     & 80.0 & 64.5 & 15.4 \\
+Small weak model   & Middle (401--800)  & 85.1 & 75.7 &  9.4 \\
+Small weak model   & Late (801--1,200)  & 85.8 & 78.9 &  6.9 \\
+\addlinespace
+Frozen pre-RL self & Early (1--400)     & 77.9 & 43.2 & 34.8 \\
+Frozen pre-RL self & Middle (401--800)  & 83.7 & 76.4 &  7.3 \\
+Frozen pre-RL self & Late (801--1,200)  & 85.6 & 82.9 &  2.7 \\
+\addlinespace
+Random-token noise & Early (1--400)     & 78.7 & 74.2 &  4.5 \\
+Random-token noise & Middle (401--800)  & 82.5 & 81.8 &  0.7 \\
+Random-token noise & Late (801--1,200)  & 84.4 & 83.9 &  0.5 \\
+\bottomrule
+\end{tabular*}
+\end{minipage}

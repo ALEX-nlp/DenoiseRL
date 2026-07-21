@@ -1,0 +1,16 @@
+\begin{minipage}{\TableWidth}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}L{1.75in}L{2.25in}YY@{}}
+\toprule
+Approach & External trajectory/context & Role in training & Stronger teacher or expert signal \\
+\midrule
+Expert/success-prefix RL & Expert, oracle, or successful trace & Provides a favorable starting state or a target to imitate & Usually required \\
+\addlinespace
+Conventional weak-to-strong learning & Weak-model prediction & Serves as a pseudo-label or supervisory target & No stronger teacher, but the weak signal directly supervises the student \\
+\addlinespace
+Hard-data construction & Newly synthesized or curated difficult problems & Expands task difficulty at the data level & Often requires strong generators, filtering, or substantial curation \\
+\addlinespace
+\best{DenoiseRL} & \best{Verifier-rejected trace from a weak model} & \best{Acts only as structured noise; the policy must reject/repair it and is updated only on its own continuation} & \best{Not required} \\
+\bottomrule
+\end{tabularx}
+\end{minipage}
