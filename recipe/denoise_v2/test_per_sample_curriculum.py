@@ -100,22 +100,22 @@ class PerSampleNoiseCurriculumTest(unittest.TestCase):
             batch_size=1,
             initial_rho=0.3,
             target_accuracy=1.0,
-            alpha=0.01,
+            alpha=0.005,
             slope_threshold=0.0075,
         )
         decreasing.update({10: 0.0})
-        decreasing.update({10: 0.0})  # slope=-0.01
+        decreasing.update({10: 0.0})  # slope=-0.005
         self.assertEqual(decreasing.active_problem_ids, (11,))
 
         increasing = PerSampleNoiseCurriculum(
             [20, 21],
             batch_size=1,
             target_accuracy=0.0,
-            alpha=0.01,
+            alpha=0.005,
             slope_threshold=0.0075,
         )
         increasing.update({20: 1.0})
-        increasing.update({20: 1.0})  # slope=+0.01
+        increasing.update({20: 1.0})  # slope=+0.005
         self.assertEqual(increasing.active_problem_ids, (21,))
 
     def test_slope_uses_only_recent_min_sample_count_and_window(self):
