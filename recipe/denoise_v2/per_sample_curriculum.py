@@ -56,7 +56,7 @@ class PerSampleNoiseCurriculum:
         alpha: float = 0.2,
         history_window: int = 10,
         min_history: int = 2,
-        slope_threshold: float = 0.0125,
+        slope_threshold: float = 0.0075,
     ) -> None:
         self.problem_ids = tuple(_normalize_id(pid) for pid in problem_ids)
         if not self.problem_ids:

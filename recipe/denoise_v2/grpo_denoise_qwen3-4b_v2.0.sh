@@ -20,7 +20,7 @@ v2_history_window=${v2_history_window:-10}
 v2_min_history=${v2_min_history:-2}
 # A sample is stable only inside the two-sided band:
 # abs(recent_rho_slope) <= v2_slope_threshold.
-v2_slope_threshold=${v2_slope_threshold:-0.0125}
+v2_slope_threshold=${v2_slope_threshold:-0.0075}
 
 # Model / cluster.
 model_name=${model_name:-Qwen3-4B-Base}

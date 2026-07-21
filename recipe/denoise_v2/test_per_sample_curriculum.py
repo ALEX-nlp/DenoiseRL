@@ -85,7 +85,7 @@ class PerSampleNoiseCurriculumTest(unittest.TestCase):
             initial_rho=0.3,
             target_accuracy=1.0,
             alpha=0.1,
-            slope_threshold=0.0125,
+            slope_threshold=0.0075,
         )
         curriculum.update({10: 0.0})  # used rho: 0.3
         metrics = curriculum.update({10: 0.0})  # used rho: 0.2, slope=-0.1
@@ -101,7 +101,7 @@ class PerSampleNoiseCurriculumTest(unittest.TestCase):
             initial_rho=0.3,
             target_accuracy=1.0,
             alpha=0.01,
-            slope_threshold=0.0125,
+            slope_threshold=0.0075,
         )
         decreasing.update({10: 0.0})
         decreasing.update({10: 0.0})  # slope=-0.01
@@ -112,7 +112,7 @@ class PerSampleNoiseCurriculumTest(unittest.TestCase):
             batch_size=1,
             target_accuracy=0.0,
             alpha=0.01,
-            slope_threshold=0.0125,
+            slope_threshold=0.0075,
         )
         increasing.update({20: 1.0})
         increasing.update({20: 1.0})  # slope=+0.01
