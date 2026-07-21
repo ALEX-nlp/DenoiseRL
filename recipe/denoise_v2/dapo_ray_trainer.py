@@ -485,7 +485,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             alpha=trainer_cfg.get("v2_alpha", 0.2),
             history_window=trainer_cfg.get("v2_history_window", 10),
             min_history=trainer_cfg.get("v2_min_history", 2),
-            slope_threshold=trainer_cfg.get("v2_slope_threshold", 0.0),
+            slope_threshold=trainer_cfg.get("v2_slope_threshold", 0.0125),
         )
         self._v2_curriculum = controller
         return controller
@@ -580,7 +580,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 f"alpha={v2_curriculum.alpha}, "
                 f"history_window={v2_curriculum.history_window}, "
                 f"min_history={v2_curriculum.min_history}, "
-                f"slope_threshold={v2_curriculum.slope_threshold}"
+                f"slope_abs_threshold={v2_curriculum.slope_threshold}"
             )
 
         dynamic_rho_controller = None

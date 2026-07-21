@@ -44,7 +44,7 @@ class DenoiseV2ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.v2_initial_rho=0.0", args)
         self.assertIn("+trainer.v2_alpha=0.2", args)
         self.assertIn("+trainer.v2_history_window=10", args)
-        self.assertIn("+trainer.v2_slope_threshold=0.0", args)
+        self.assertIn("+trainer.v2_slope_threshold=0.0125", args)
         self.assertIn("trainer.total_epochs=10000", args)
 
     def test_exposes_accuracy_controller_values_as_environment_overrides(self):

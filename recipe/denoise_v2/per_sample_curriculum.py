@@ -56,7 +56,7 @@ class PerSampleNoiseCurriculum:
         alpha: float = 0.2,
         history_window: int = 10,
         min_history: int = 2,
-        slope_threshold: float = 0.0,
+        slope_threshold: float = 0.0125,
     ) -> None:
         self.problem_ids = tuple(_normalize_id(pid) for pid in problem_ids)
         if not self.problem_ids:
@@ -100,6 +100,8 @@ class PerSampleNoiseCurriculum:
         if not (2 <= self.min_history <= self.history_window):
             raise ValueError("min_history must be in [2, history_window].")
         self.slope_threshold = self._finite("slope_threshold", slope_threshold)
+        if self.slope_threshold < 0.0:
+            raise ValueError("slope_threshold must be non-negative.")
 
         # Pool order is never shuffled: the first batch is active, and the cursor
         # always advances through one consecutive slice for replacements.
@@ -200,7 +202,7 @@ class PerSampleNoiseCurriculum:
             index
             for index in self.active_indices
             if slopes[index] is not None
-            and slopes[index] <= self.slope_threshold
+            and abs(slopes[index]) <= self.slope_threshold
         ]
 
         # N is calculated once from the entire post-update batch. Every normal
@@ -279,6 +281,7 @@ class PerSampleNoiseCurriculum:
             "denoise/v2/rho_active_min": float(np.min(active_rhos)),
             "denoise/v2/rho_active_max": float(np.max(active_rhos)),
             "denoise/v2/stable_candidates": float(len(stable_indices)),
+            "denoise/v2/slope_abs_threshold": self.slope_threshold,
             "denoise/v2/replaced_this_step": float(replace_count),
             "denoise/v2/stable_replaced_this_step": float(stable_replace_count),
             "denoise/v2/retired_total": float(self.retired_total),
@@ -287,11 +290,15 @@ class PerSampleNoiseCurriculum:
             "denoise/v2/slopes_defined": float(len(finite_slopes)),
         }
         if finite_slopes:
+            absolute_slopes = [abs(value) for value in finite_slopes]
             metrics.update(
                 {
                     "denoise/v2/slope_mean": float(np.mean(finite_slopes)),
                     "denoise/v2/slope_min": float(np.min(finite_slopes)),
                     "denoise/v2/slope_max": float(np.max(finite_slopes)),
+                    "denoise/v2/slope_abs_mean": float(np.mean(absolute_slopes)),
+                    "denoise/v2/slope_abs_min": float(np.min(absolute_slopes)),
+                    "denoise/v2/slope_abs_max": float(np.max(absolute_slopes)),
                 }
             )
         return metrics

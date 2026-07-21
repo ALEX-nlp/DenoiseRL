@@ -69,13 +69,54 @@ class PerSampleNoiseCurriculumTest(unittest.TestCase):
         metrics = curriculum.update({10: 1.0, 11: 0.5, 12: 0.0})
 
         # Used-rho histories are [0, .05], [0, 0], [0, 0]. The latter two
-        # have slope <= 0 and are replaced by consecutive pool rows 3 and 4.
+        # are inside the absolute-slope stability band and are replaced by
+        # consecutive pool rows 3 and 4.
         self.assertEqual(curriculum.active_indices, [0, 3, 4])
         self.assertEqual(curriculum.active_problem_ids, (10, 13, 14))
         self.assertEqual(metrics["denoise/v2/replaced_this_step"], 2.0)
         expected_n = (0.1 + 0.0 + 0.0) / 3.0
         self.assertAlmostEqual(curriculum.rho_for_problem(13), expected_n)
         self.assertAlmostEqual(curriculum.rho_for_problem(14), expected_n)
+
+    def test_large_negative_slope_is_not_stable(self):
+        curriculum = PerSampleNoiseCurriculum(
+            [10, 11],
+            batch_size=1,
+            initial_rho=0.3,
+            target_accuracy=1.0,
+            alpha=0.1,
+            slope_threshold=0.0125,
+        )
+        curriculum.update({10: 0.0})  # used rho: 0.3
+        metrics = curriculum.update({10: 0.0})  # used rho: 0.2, slope=-0.1
+
+        self.assertEqual(curriculum.active_problem_ids, (10,))
+        self.assertEqual(metrics["denoise/v2/stable_candidates"], 0.0)
+        self.assertAlmostEqual(metrics["denoise/v2/slope_abs_mean"], 0.1)
+
+    def test_small_positive_and_negative_slopes_are_stable(self):
+        decreasing = PerSampleNoiseCurriculum(
+            [10, 11],
+            batch_size=1,
+            initial_rho=0.3,
+            target_accuracy=1.0,
+            alpha=0.01,
+            slope_threshold=0.0125,
+        )
+        decreasing.update({10: 0.0})
+        decreasing.update({10: 0.0})  # slope=-0.01
+        self.assertEqual(decreasing.active_problem_ids, (11,))
+
+        increasing = PerSampleNoiseCurriculum(
+            [20, 21],
+            batch_size=1,
+            target_accuracy=0.0,
+            alpha=0.01,
+            slope_threshold=0.0125,
+        )
+        increasing.update({20: 1.0})
+        increasing.update({20: 1.0})  # slope=+0.01
+        self.assertEqual(increasing.active_problem_ids, (21,))
 
     def test_slope_uses_only_recent_min_sample_count_and_window(self):
         curriculum = PerSampleNoiseCurriculum(

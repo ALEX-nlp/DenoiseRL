@@ -18,7 +18,9 @@ v2_target_accuracy=${v2_target_accuracy:-0.75}
 v2_alpha=${v2_alpha:-0.2}
 v2_history_window=${v2_history_window:-10}
 v2_min_history=${v2_min_history:-2}
-v2_slope_threshold=${v2_slope_threshold:-0.0}
+# A sample is stable only inside the two-sided band:
+# abs(recent_rho_slope) <= v2_slope_threshold.
+v2_slope_threshold=${v2_slope_threshold:-0.0125}
 
 # Model / cluster.
 model_name=${model_name:-Qwen3-4B-Base}
