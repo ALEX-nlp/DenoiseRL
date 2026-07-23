@@ -9,10 +9,20 @@ from recipe.denoise_v2.length_reward import (
 
 
 class LinearLengthFactorTest(unittest.TestCase):
+    def test_reward_stays_flat_before_cache_then_drops_linearly(self):
+        factors = linear_length_factor(
+            torch.tensor([0, 3072, 3584, 4096]),
+            max_response_length=4096,
+            length_cache=1024,
+        )
+
+        torch.testing.assert_close(factors, torch.tensor([1.0, 1.0, 0.5, 0.0]))
+
     def test_linear_endpoints_and_midpoint(self):
         factors = linear_length_factor(
             torch.tensor([0, 50, 100]),
             max_response_length=100,
+            length_cache=100,
             min_factor=0.5,
         )
 
@@ -22,6 +32,7 @@ class LinearLengthFactorTest(unittest.TestCase):
         factors = linear_length_factor(
             torch.tensor([100, 150]),
             max_response_length=100,
+            length_cache=100,
             min_factor=0.5,
         )
 
@@ -32,6 +43,15 @@ class LinearLengthFactorTest(unittest.TestCase):
             linear_length_factor(
                 torch.tensor([-1]),
                 max_response_length=100,
+                length_cache=100,
+            )
+
+    def test_rejects_cache_larger_than_response_budget(self):
+        with self.assertRaisesRegex(ValueError, "length_cache"):
+            linear_length_factor(
+                torch.tensor([0]),
+                max_response_length=100,
+                length_cache=101,
             )
 
 
@@ -50,6 +70,7 @@ class ApplyCorrectLengthRewardTest(unittest.TestCase):
             correctness=torch.tensor([1.0, 1.0, 0.0]),
             response_lengths=torch.tensor([0, 100, 100]),
             max_response_length=100,
+            length_cache=100,
             min_factor=0.5,
         )
 

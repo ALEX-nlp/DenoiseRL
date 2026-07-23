@@ -1970,8 +1970,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                         "function to return one 'acc' value per rollout."
                     )
                 max_response_length = int(self.config.data.max_response_length)
+                length_cache = int(
+                    self.config.trainer.get(
+                        "correct_length_reward_cache_length", 1024
+                    )
+                )
                 min_factor = float(
-                    self.config.trainer.get("correct_length_reward_min_factor", 0.5)
+                    self.config.trainer.get("correct_length_reward_min_factor", 0.0)
                 )
                 reward_before_length = reward_tensor.sum(dim=-1)
                 reward_tensor, effective_factors = apply_correct_length_reward(
@@ -1981,6 +1986,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     ),
                     response_lengths=generated_response_lengths,
                     max_response_length=max_response_length,
+                    length_cache=length_cache,
                     min_factor=min_factor,
                 )
 
@@ -1991,6 +1997,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                 generated_lengths_f = generated_response_lengths.to(torch.float32)
                 _metrics["denoise/length_reward/max_response_length"] = float(
                     max_response_length
+                )
+                _metrics["denoise/length_reward/cache_length"] = float(length_cache)
+                _metrics["denoise/length_reward/penalty_start_length"] = float(
+                    max_response_length - length_cache
                 )
                 _metrics["denoise/length_reward/min_factor"] = min_factor
                 _metrics["denoise/length_reward/n_correct"] = float(

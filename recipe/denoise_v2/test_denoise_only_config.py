@@ -56,23 +56,26 @@ class DenoiseV2ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.v2_target_accuracy=0.6", args)
         self.assertIn("+trainer.v2_alpha=0.02", args)
 
-    def test_enables_correct_length_reward_with_linear_half_floor(self):
+    def test_enables_correct_length_reward_with_dapo_aligned_amplitude(self):
         result = self._expand_script()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         args = result.stdout.splitlines()
         self.assertIn("+trainer.correct_length_reward_enabled=True", args)
-        self.assertIn("+trainer.correct_length_reward_min_factor=0.5", args)
+        self.assertIn("+trainer.correct_length_reward_cache_length=1024", args)
+        self.assertIn("+trainer.correct_length_reward_min_factor=0.0", args)
 
     def test_exposes_length_reward_as_environment_overrides(self):
         result = self._expand_script(
             correct_length_reward_enabled=False,
+            correct_length_reward_cache_length=512,
             correct_length_reward_min_factor=0.7,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         args = result.stdout.splitlines()
         self.assertIn("+trainer.correct_length_reward_enabled=False", args)
+        self.assertIn("+trainer.correct_length_reward_cache_length=512", args)
         self.assertIn("+trainer.correct_length_reward_min_factor=0.7", args)
 
 
