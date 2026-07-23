@@ -22,14 +22,13 @@ v2_min_history=${v2_min_history:-2}
 # abs(recent_rho_slope) <= v2_slope_threshold.
 v2_slope_threshold=${v2_slope_threshold:-0.01}
 
-# Correct rollouts keep full reward before the final length cache, then linearly
-# decrease to correct_length_reward_min_factor at max_response_length.
+# For each correct rollout, prefix length p defines a dynamic cache: full reward
+# through R-p generated tokens, then a linear decrease over the final p tokens.
 correct_length_reward_enabled=${correct_length_reward_enabled:-True}
-correct_length_reward_cache_length=${correct_length_reward_cache_length:-1024}
 correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
 case "${correct_length_reward_enabled}" in
     True|true|1)
-        length_reward_tag="len${correct_length_reward_min_factor}-cache${correct_length_reward_cache_length}"
+        length_reward_tag="len${correct_length_reward_min_factor}-dyncache"
         ;;
     False|false|0)
         length_reward_tag="nolen"
@@ -190,6 +189,5 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.v2_min_history=${v2_min_history} \
     +trainer.v2_slope_threshold=${v2_slope_threshold} \
     +trainer.correct_length_reward_enabled=${correct_length_reward_enabled} \
-    +trainer.correct_length_reward_cache_length=${correct_length_reward_cache_length} \
     +trainer.correct_length_reward_min_factor=${correct_length_reward_min_factor} \
     +trainer.wandb_run_id="${wandb_run_id}"

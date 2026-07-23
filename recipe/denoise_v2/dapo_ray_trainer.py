@@ -1777,11 +1777,10 @@ class RayDAPOTrainer(RayPPOTrainer):
         new_batch.non_tensor_batch["noise_rho"] = noise_rhos_np
         new_batch = new_batch.union(gen_batch_output)
 
-        # Preserve the policy's actual generated length before folding the noisy
-        # prefix into the response window. In cutdown/shift mode that transform can
-        # add prefix tokens and discard continuation tokens, neither of which should
-        # affect a reward intended to discourage verbose model generations.
-        generated_response_width = new_batch.batch["responses"].shape[1]
+        # Preserve the actual policy generation length before cutdown. For a
+        # prefix of length p, only the first R - p generated tokens survive the
+        # fold; the final p-token region is the dynamic length-reward cache.
+        generated_response_width = int(new_batch.batch["responses"].shape[1])
         generated_response_lengths = new_batch.batch["attention_mask"][
             :, -generated_response_width:
         ].sum(dim=-1)
@@ -1969,12 +1968,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                         "trainer.correct_length_reward_enabled=True requires the reward "
                         "function to return one 'acc' value per rollout."
                     )
-                max_response_length = int(self.config.data.max_response_length)
-                length_cache = int(
-                    self.config.trainer.get(
-                        "correct_length_reward_cache_length", 1024
-                    )
-                )
                 min_factor = float(
                     self.config.trainer.get("correct_length_reward_min_factor", 0.0)
                 )
@@ -1985,8 +1978,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                         np.asarray(correctness), device=reward_tensor.device
                     ),
                     response_lengths=generated_response_lengths,
-                    max_response_length=max_response_length,
-                    length_cache=length_cache,
+                    prefix_lengths=torch.as_tensor(
+                        partial_lens_np, device=reward_tensor.device
+                    ),
+                    max_response_length=generated_response_width,
                     min_factor=min_factor,
                 )
 
@@ -1995,12 +1990,22 @@ class RayDAPOTrainer(RayPPOTrainer):
                 ).reshape(-1)
                 correct_mask = correctness_t > 0
                 generated_lengths_f = generated_response_lengths.to(torch.float32)
-                _metrics["denoise/length_reward/max_response_length"] = float(
-                    max_response_length
+                prefix_lengths_f = torch.as_tensor(
+                    partial_lens_np,
+                    device=reward_tensor.device,
+                    dtype=torch.float32,
                 )
-                _metrics["denoise/length_reward/cache_length"] = float(length_cache)
-                _metrics["denoise/length_reward/penalty_start_length"] = float(
-                    max_response_length - length_cache
+                penalty_start_lengths = (
+                    float(generated_response_width) - prefix_lengths_f
+                )
+                _metrics["denoise/length_reward/max_response_length"] = float(
+                    generated_response_width
+                )
+                _metrics["denoise/length_reward/dynamic_cache_mean"] = float(
+                    prefix_lengths_f.mean().item()
+                )
+                _metrics["denoise/length_reward/penalty_start_length_mean"] = float(
+                    penalty_start_lengths.mean().item()
                 )
                 _metrics["denoise/length_reward/min_factor"] = min_factor
                 _metrics["denoise/length_reward/n_correct"] = float(
@@ -2016,6 +2021,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                     _metrics[
                         "denoise/length_reward/correct_generated_length_mean"
                     ] = float(correct_lengths.mean().item())
+                    _metrics[
+                        "denoise/length_reward/correct_dynamic_cache_mean"
+                    ] = float(prefix_lengths_f[correct_mask].mean().item())
                     _metrics["denoise/length_reward/correct_factor_mean"] = float(
                         correct_factors.mean().item()
                     )
@@ -2031,6 +2039,9 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 reward_extra_infos_dict["generated_response_length"] = (
                     generated_response_lengths.detach().cpu().tolist()
+                )
+                reward_extra_infos_dict["length_reward_dynamic_cache"] = (
+                    prefix_lengths_f.detach().cpu().tolist()
                 )
                 reward_extra_infos_dict["length_reward_factor"] = (
                     effective_factors.detach().cpu().tolist()

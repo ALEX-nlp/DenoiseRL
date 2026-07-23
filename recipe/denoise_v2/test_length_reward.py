@@ -4,54 +4,65 @@ import torch
 
 from recipe.denoise_v2.length_reward import (
     apply_correct_length_reward,
-    linear_length_factor,
+    dynamic_cutdown_length_factor,
 )
 
 
-class LinearLengthFactorTest(unittest.TestCase):
-    def test_reward_stays_flat_before_cache_then_drops_linearly(self):
-        factors = linear_length_factor(
-            torch.tensor([0, 3072, 3584, 4096]),
+class DynamicCutdownLengthFactorTest(unittest.TestCase):
+    def test_prefix_defines_penalty_start_and_cache_width(self):
+        factors = dynamic_cutdown_length_factor(
+            torch.tensor([3000, 3296, 3500, 4096]),
+            prefix_lengths=torch.tensor([800, 800, 800, 800]),
             max_response_length=4096,
-            length_cache=1024,
         )
 
-        torch.testing.assert_close(factors, torch.tensor([1.0, 1.0, 0.5, 0.0]))
-
-    def test_linear_endpoints_and_midpoint(self):
-        factors = linear_length_factor(
-            torch.tensor([0, 50, 100]),
-            max_response_length=100,
-            length_cache=100,
-            min_factor=0.5,
+        torch.testing.assert_close(
+            factors,
+            torch.tensor([1.0, 1.0, 0.745, 0.0]),
         )
 
-        torch.testing.assert_close(factors, torch.tensor([1.0, 0.75, 0.5]))
-
-    def test_lengths_above_budget_are_clamped(self):
-        factors = linear_length_factor(
-            torch.tensor([100, 150]),
-            max_response_length=100,
-            length_cache=100,
-            min_factor=0.5,
+    def test_different_prefixes_create_different_dynamic_caches(self):
+        factors = dynamic_cutdown_length_factor(
+            torch.tensor([3584, 3840]),
+            prefix_lengths=torch.tensor([1024, 512]),
+            max_response_length=4096,
         )
 
         torch.testing.assert_close(factors, torch.tensor([0.5, 0.5]))
 
+    def test_zero_prefix_has_no_length_penalty(self):
+        factors = dynamic_cutdown_length_factor(
+            torch.tensor([0, 4096]),
+            prefix_lengths=torch.tensor([0, 0]),
+            max_response_length=4096,
+        )
+
+        torch.testing.assert_close(factors, torch.tensor([1.0, 1.0]))
+
+    def test_min_factor_is_respected_at_generation_limit(self):
+        factors = dynamic_cutdown_length_factor(
+            torch.tensor([100]),
+            prefix_lengths=torch.tensor([20]),
+            max_response_length=100,
+            min_factor=0.5,
+        )
+
+        torch.testing.assert_close(factors, torch.tensor([0.5]))
+
     def test_rejects_negative_lengths(self):
         with self.assertRaisesRegex(ValueError, "non-negative"):
-            linear_length_factor(
+            dynamic_cutdown_length_factor(
                 torch.tensor([-1]),
+                prefix_lengths=torch.tensor([20]),
                 max_response_length=100,
-                length_cache=100,
             )
 
-    def test_rejects_cache_larger_than_response_budget(self):
-        with self.assertRaisesRegex(ValueError, "length_cache"):
-            linear_length_factor(
+    def test_rejects_prefix_larger_than_response_budget(self):
+        with self.assertRaisesRegex(ValueError, "prefix_lengths"):
+            dynamic_cutdown_length_factor(
                 torch.tensor([0]),
+                prefix_lengths=torch.tensor([101]),
                 max_response_length=100,
-                length_cache=101,
             )
 
 
@@ -68,10 +79,9 @@ class ApplyCorrectLengthRewardTest(unittest.TestCase):
         shaped, effective_factors = apply_correct_length_reward(
             rewards,
             correctness=torch.tensor([1.0, 1.0, 0.0]),
-            response_lengths=torch.tensor([0, 100, 100]),
-            max_response_length=100,
-            length_cache=100,
-            min_factor=0.5,
+            response_lengths=torch.tensor([3296, 4096, 4096]),
+            prefix_lengths=torch.tensor([800, 800, 800]),
+            max_response_length=4096,
         )
 
         torch.testing.assert_close(
@@ -79,13 +89,13 @@ class ApplyCorrectLengthRewardTest(unittest.TestCase):
             torch.tensor(
                 [
                     [0.0, 1.0],
-                    [0.0, 0.5],
+                    [0.0, 0.0],
                     [0.0, -0.5],
                 ]
             ),
         )
         torch.testing.assert_close(
-            effective_factors, torch.tensor([1.0, 0.5, 1.0])
+            effective_factors, torch.tensor([1.0, 0.0, 1.0])
         )
 
     def test_requires_one_length_and_correctness_value_per_row(self):
@@ -94,6 +104,17 @@ class ApplyCorrectLengthRewardTest(unittest.TestCase):
                 torch.zeros(2, 4),
                 correctness=torch.tensor([1.0]),
                 response_lengths=torch.tensor([1, 2]),
+                prefix_lengths=torch.tensor([1, 2]),
+                max_response_length=4,
+            )
+
+    def test_requires_one_prefix_length_per_row(self):
+        with self.assertRaisesRegex(ValueError, "prefix_lengths"):
+            apply_correct_length_reward(
+                torch.zeros(2, 4),
+                correctness=torch.tensor([1.0, 1.0]),
+                response_lengths=torch.tensor([1, 2]),
+                prefix_lengths=torch.tensor([1]),
                 max_response_length=4,
             )
 
