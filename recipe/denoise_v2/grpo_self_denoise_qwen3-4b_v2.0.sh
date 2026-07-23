@@ -14,13 +14,13 @@ effective_rollout_n=16
 v2_initial_rho=${v2_initial_rho:-0.0}
 v2_min_rho=${v2_min_rho:-0.0}
 v2_max_rho=${v2_max_rho:-0.5}
-v2_target_accuracy=${v2_target_accuracy:-0.8}
-v2_alpha=${v2_alpha:-0.1}
+v2_target_accuracy=${v2_target_accuracy:-0.75}
+v2_alpha=${v2_alpha:-0.2}
 v2_history_window=${v2_history_window:-5}
 v2_min_history=${v2_min_history:-2}
 # A sample is stable only inside the two-sided band:
 # abs(recent_rho_slope) <= v2_slope_threshold.
-v2_slope_threshold=${v2_slope_threshold:-0.01}
+v2_slope_threshold=${v2_slope_threshold:-0.02}
 
 # Model / cluster.
 model_name=${model_name:-Qwen3-4B-Base}
@@ -62,11 +62,11 @@ infer_ppo_max_token_len=$((2 * (max_prompt_length + max_response_length)))
 # selects active indices beginning with [0, train_prompt_bsz).
 RAY_DATA_HOME=${RAY_DATA_HOME:-.}
 MODEL_PATH=${MODEL_PATH:-../Model/Qwen/${model_name}}
-TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen2.5-1.5b.parquet}
+TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen3-4b-base.parquet}
 TEST_FILE=${TEST_FILE:-'["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]'}
 
 run_tag="rho${v2_initial_rho}-${v2_max_rho}_target${v2_target_accuracy}_alpha${v2_alpha}_window${v2_history_window}_slope${v2_slope_threshold}"
-experiment_name=${experiment_name:-"grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
+experiment_name=${experiment_name:-"grpo-self-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
 

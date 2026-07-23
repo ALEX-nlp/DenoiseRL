@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 export WANDB_MODE=offline
-version="6_v4.0"
+version="7_v5.0"
 
 # -----------------------------------------------------------------------------
 # denoise specific knobs
@@ -163,7 +163,7 @@ clip_ratio_high=0.2
 max_prompt_length=$((1024 * 8))
 max_response_length=$((1024 * 4))
 
-loss_agg_mode="token-mean"
+loss_agg_mode="seq-mean-token-mean"
 enable_filter_groups=False
 filter_groups_metric=acc
 
