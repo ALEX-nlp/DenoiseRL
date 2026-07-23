@@ -66,6 +66,7 @@ from tqdm import tqdm
 
 import verl.utils.torch_functional as verl_F
 from recipe.denoise_v2.dynamic_rho import DynamicRhoController
+from recipe.denoise_v2.length_reward import apply_correct_length_reward
 from recipe.denoise_v2.noise_metrics import compute_paired_noise_acc_metrics
 from recipe.denoise_v2.per_sample_curriculum import (
     PerSampleNoiseCurriculum,
@@ -1776,6 +1777,15 @@ class RayDAPOTrainer(RayPPOTrainer):
         new_batch.non_tensor_batch["noise_rho"] = noise_rhos_np
         new_batch = new_batch.union(gen_batch_output)
 
+        # Preserve the policy's actual generated length before folding the noisy
+        # prefix into the response window. In cutdown/shift mode that transform can
+        # add prefix tokens and discard continuation tokens, neither of which should
+        # affect a reward intended to discourage verbose model generations.
+        generated_response_width = new_batch.batch["responses"].shape[1]
+        generated_response_lengths = new_batch.batch["attention_mask"][
+            :, -generated_response_width:
+        ].sum(dim=-1)
+
         # Fold the noisy prefix into the response window. Three modes:
         #   * "shift":   response width = R, prefix gets response_mask = 1
         #                (gradient flows through the off-policy prefix; more signal,
@@ -1947,6 +1957,75 @@ class RayDAPOTrainer(RayPPOTrainer):
             reward_tensor, reward_extra_infos_dict = compute_reward(
                 new_batch, self.reward_fn, rollout_save_path=local_global_step_save_json
             )
+
+            length_reward_enabled = bool(
+                self.config.trainer.get("correct_length_reward_enabled", False)
+            )
+            _metrics["denoise/length_reward/enabled"] = float(length_reward_enabled)
+            if length_reward_enabled:
+                correctness = reward_extra_infos_dict.get("acc")
+                if correctness is None:
+                    raise ValueError(
+                        "trainer.correct_length_reward_enabled=True requires the reward "
+                        "function to return one 'acc' value per rollout."
+                    )
+                max_response_length = int(self.config.data.max_response_length)
+                min_factor = float(
+                    self.config.trainer.get("correct_length_reward_min_factor", 0.5)
+                )
+                reward_before_length = reward_tensor.sum(dim=-1)
+                reward_tensor, effective_factors = apply_correct_length_reward(
+                    reward_tensor,
+                    correctness=torch.as_tensor(
+                        np.asarray(correctness), device=reward_tensor.device
+                    ),
+                    response_lengths=generated_response_lengths,
+                    max_response_length=max_response_length,
+                    min_factor=min_factor,
+                )
+
+                correctness_t = torch.as_tensor(
+                    np.asarray(correctness), device=reward_tensor.device
+                ).reshape(-1)
+                correct_mask = correctness_t > 0
+                generated_lengths_f = generated_response_lengths.to(torch.float32)
+                _metrics["denoise/length_reward/max_response_length"] = float(
+                    max_response_length
+                )
+                _metrics["denoise/length_reward/min_factor"] = min_factor
+                _metrics["denoise/length_reward/n_correct"] = float(
+                    int(correct_mask.sum().item())
+                )
+                _metrics["denoise/length_reward/generated_length_mean"] = float(
+                    generated_lengths_f.mean().item()
+                )
+                if torch.any(correct_mask):
+                    correct_lengths = generated_lengths_f[correct_mask]
+                    correct_factors = effective_factors[correct_mask]
+                    final_rewards = reward_tensor.sum(dim=-1)
+                    _metrics[
+                        "denoise/length_reward/correct_generated_length_mean"
+                    ] = float(correct_lengths.mean().item())
+                    _metrics["denoise/length_reward/correct_factor_mean"] = float(
+                        correct_factors.mean().item()
+                    )
+                    _metrics["denoise/length_reward/correct_factor_min"] = float(
+                        correct_factors.min().item()
+                    )
+                    _metrics[
+                        "denoise/length_reward/correct_reward_before_mean"
+                    ] = float(reward_before_length[correct_mask].mean().item())
+                    _metrics[
+                        "denoise/length_reward/correct_reward_after_mean"
+                    ] = float(final_rewards[correct_mask].mean().item())
+
+                reward_extra_infos_dict["generated_response_length"] = (
+                    generated_response_lengths.detach().cpu().tolist()
+                )
+                reward_extra_infos_dict["length_reward_factor"] = (
+                    effective_factors.detach().cpu().tolist()
+                )
+
             new_batch.batch["token_level_scores"] = reward_tensor
             if reward_extra_infos_dict:
                 new_batch.non_tensor_batch.update(
