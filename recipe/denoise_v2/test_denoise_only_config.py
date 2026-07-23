@@ -42,9 +42,10 @@ class DenoiseV2ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.part_response_ratio_strategy=fixed", args)
         self.assertIn("+trainer.v2_curriculum_enabled=True", args)
         self.assertIn("+trainer.v2_initial_rho=0.0", args)
-        self.assertIn("+trainer.v2_alpha=0.2", args)
-        self.assertIn("+trainer.v2_history_window=10", args)
-        self.assertIn("+trainer.v2_slope_threshold=0.0075", args)
+        self.assertIn("+trainer.v2_target_accuracy=0.8", args)
+        self.assertIn("+trainer.v2_alpha=0.1", args)
+        self.assertIn("+trainer.v2_history_window=5", args)
+        self.assertIn("+trainer.v2_slope_threshold=0.01", args)
         self.assertIn("trainer.total_epochs=10000", args)
 
     def test_exposes_accuracy_controller_values_as_environment_overrides(self):
