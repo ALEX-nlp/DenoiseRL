@@ -13,8 +13,8 @@ effective_rollout_n=16
 # replacements inherit the post-update mean rho N of the previous active batch.
 v2_initial_rho=${v2_initial_rho:-0.0}
 v2_min_rho=${v2_min_rho:-0.0}
-v2_max_rho=${v2_max_rho:-0.5}
-v2_target_accuracy=${v2_target_accuracy:-0.75}
+v2_max_rho=${v2_max_rho:-0.8}
+v2_target_accuracy=${v2_target_accuracy:-0.8}
 v2_alpha=${v2_alpha:-0.2}
 v2_history_window=${v2_history_window:-5}
 v2_min_history=${v2_min_history:-2}
@@ -40,7 +40,7 @@ case "${correct_length_reward_enabled}" in
 esac
 
 # Model / cluster.
-model_name=${model_name:-Qwen3-4B-Base}
+model_name=${model_name:-Qwen3-8B-Base}
 offload=${offload:-True}
 ref_offload=${ref_offload:-True}
 num_gpus=${num_gpus:-4}
@@ -49,7 +49,7 @@ sp_size=${sp_size:-1}
 
 # GRPO schedule.
 epoch=${epoch:-10000}
-project_name=${project_name:-DenoiseRL-v2-4B}
+project_name=${project_name:-DenoiseRL-v2-8B}
 lr=${lr:-1e-6}
 lr_warmup_steps=${lr_warmup_steps:-0}
 test_and_save_freq=${test_and_save_freq:-40}
@@ -83,7 +83,7 @@ TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen2.5-1.5b.parquet}
 TEST_FILE=${TEST_FILE:-'["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]'}
 
 run_tag="rho${v2_initial_rho}-${v2_max_rho}_target${v2_target_accuracy}_alpha${v2_alpha}_window${v2_history_window}_slope${v2_slope_threshold}_${length_reward_tag}"
-experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
+experiment_name=${experiment_name:-"grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
 
@@ -173,7 +173,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.noise_source=partial_wrong \
     +trainer.partial_wrong_cut_strategy=token \
     +trainer.part_response_ratio_strategy=fixed \
-    +trainer.partial_mode=none \
+    +trainer.partial_mode=cutdown \
     +trainer.use_problem_id_as_uid=True \
     +trainer.use_same_uid=False \
     +trainer.sub_rollout_separate_adv_uid=False \
