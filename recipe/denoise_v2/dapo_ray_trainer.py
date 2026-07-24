@@ -66,7 +66,7 @@ from tqdm import tqdm
 
 import verl.utils.torch_functional as verl_F
 from recipe.denoise_v2.dynamic_rho import DynamicRhoController
-from recipe.denoise_v2.length_reward import apply_correct_length_reward
+from recipe.denoise_v2.length_reward import apply_dynamic_length_reward
 from recipe.denoise_v2.noise_metrics import compute_paired_noise_acc_metrics
 from recipe.denoise_v2.per_sample_curriculum import (
     PerSampleNoiseCurriculum,
@@ -1971,8 +1971,23 @@ class RayDAPOTrainer(RayPPOTrainer):
                 min_factor = float(
                     self.config.trainer.get("correct_length_reward_min_factor", 0.0)
                 )
+                length_reward_scope = str(
+                    self.config.trainer.get("length_reward_scope", "correct")
+                ).lower()
+                visible_response_width = int(new_batch.batch["responses"].shape[1])
+                prompt_width = int(new_batch.batch["prompts"].shape[1])
+                visible_response_lengths = new_batch.batch["attention_mask"][
+                    :, prompt_width:
+                ].sum(dim=-1)
+                reward_positions = (visible_response_lengths - 1).clamp(
+                    min=0, max=visible_response_width - 1
+                )
                 reward_before_length = reward_tensor.sum(dim=-1)
-                reward_tensor, effective_factors = apply_correct_length_reward(
+                (
+                    reward_tensor,
+                    effective_factors,
+                    effective_penalties,
+                ) = apply_dynamic_length_reward(
                     reward_tensor,
                     correctness=torch.as_tensor(
                         np.asarray(correctness), device=reward_tensor.device
@@ -1981,8 +1996,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                     prefix_lengths=torch.as_tensor(
                         partial_lens_np, device=reward_tensor.device
                     ),
+                    reward_positions=reward_positions,
                     max_response_length=generated_response_width,
                     min_factor=min_factor,
+                    scope=length_reward_scope,
                 )
 
                 correctness_t = torch.as_tensor(
@@ -2008,8 +2025,17 @@ class RayDAPOTrainer(RayPPOTrainer):
                     penalty_start_lengths.mean().item()
                 )
                 _metrics["denoise/length_reward/min_factor"] = min_factor
+                _metrics["denoise/length_reward/scope_is_all"] = float(
+                    length_reward_scope == "all"
+                )
                 _metrics["denoise/length_reward/n_correct"] = float(
                     int(correct_mask.sum().item())
+                )
+                _metrics["denoise/length_reward/n_penalized"] = float(
+                    int((effective_penalties > 0).sum().item())
+                )
+                _metrics["denoise/length_reward/penalty_mean"] = float(
+                    effective_penalties.mean().item()
                 )
                 _metrics["denoise/length_reward/generated_length_mean"] = float(
                     generated_lengths_f.mean().item()
@@ -2045,6 +2071,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                 )
                 reward_extra_infos_dict["length_reward_factor"] = (
                     effective_factors.detach().cpu().tolist()
+                )
+                reward_extra_infos_dict["length_reward_penalty"] = (
+                    effective_penalties.detach().cpu().tolist()
                 )
 
             new_batch.batch["token_level_scores"] = reward_tensor

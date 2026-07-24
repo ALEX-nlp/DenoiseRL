@@ -5,10 +5,11 @@ from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).with_name("grpo_denoise_qwen3-4b_v2.0.sh")
+SCRIPT_8B_PATH = Path(__file__).with_name("grpo_denoise_qwen3-8b_v2.0.sh")
 
 
 class DenoiseV2ConfigTest(unittest.TestCase):
-    def _expand_script(self, **overrides):
+    def _expand_script(self, script_path=SCRIPT_PATH, **overrides):
         env = os.environ.copy()
         env.update({key: str(value) for key, value in overrides.items()})
         return subprocess.run(
@@ -17,7 +18,7 @@ class DenoiseV2ConfigTest(unittest.TestCase):
                 "-c",
                 'python3() { printf "%s\\n" "$@"; }; export -f python3; source "$1"',
                 "bash",
-                str(SCRIPT_PATH),
+                str(script_path),
             ],
             env=env,
             capture_output=True,
@@ -40,12 +41,13 @@ class DenoiseV2ConfigTest(unittest.TestCase):
         args = result.stdout.splitlines()
         self.assertIn("data.shuffle=False", args)
         self.assertIn("+trainer.part_response_ratio_strategy=fixed", args)
+        self.assertIn("+trainer.partial_mode=none", args)
         self.assertIn("+trainer.v2_curriculum_enabled=True", args)
         self.assertIn("+trainer.v2_initial_rho=0.0", args)
-        self.assertIn("+trainer.v2_target_accuracy=0.8", args)
-        self.assertIn("+trainer.v2_alpha=0.1", args)
+        self.assertIn("+trainer.v2_target_accuracy=0.75", args)
+        self.assertIn("+trainer.v2_alpha=0.2", args)
         self.assertIn("+trainer.v2_history_window=5", args)
-        self.assertIn("+trainer.v2_slope_threshold=0.01", args)
+        self.assertIn("+trainer.v2_slope_threshold=0.02", args)
         self.assertIn("trainer.total_epochs=10000", args)
 
     def test_exposes_accuracy_controller_values_as_environment_overrides(self):
@@ -63,17 +65,29 @@ class DenoiseV2ConfigTest(unittest.TestCase):
         args = result.stdout.splitlines()
         self.assertIn("+trainer.correct_length_reward_enabled=True", args)
         self.assertIn("+trainer.correct_length_reward_min_factor=0.0", args)
+        self.assertIn("+trainer.length_reward_scope=all", args)
+
+    def test_8b_also_penalizes_all_samples_by_default(self):
+        result = self._expand_script(SCRIPT_8B_PATH)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = result.stdout.splitlines()
+        self.assertIn("+trainer.correct_length_reward_enabled=True", args)
+        self.assertIn("+trainer.correct_length_reward_min_factor=0.0", args)
+        self.assertIn("+trainer.length_reward_scope=all", args)
 
     def test_exposes_length_reward_as_environment_overrides(self):
         result = self._expand_script(
             correct_length_reward_enabled=False,
             correct_length_reward_min_factor=0.7,
+            length_reward_scope="correct",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         args = result.stdout.splitlines()
         self.assertIn("+trainer.correct_length_reward_enabled=False", args)
         self.assertIn("+trainer.correct_length_reward_min_factor=0.7", args)
+        self.assertIn("+trainer.length_reward_scope=correct", args)
 
 
 if __name__ == "__main__":

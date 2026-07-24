@@ -22,13 +22,22 @@ v2_min_history=${v2_min_history:-2}
 # abs(recent_rho_slope) <= v2_slope_threshold.
 v2_slope_threshold=${v2_slope_threshold:-0.02}
 
-# For each correct rollout, prefix length p defines a dynamic cache: full reward
-# through R-p generated tokens, then a linear decrease over the final p tokens.
+# Prefix length p defines a dynamic cache: no penalty through R-p generated
+# tokens, then a linear penalty over the final p. Scope selects correct vs. all.
 correct_length_reward_enabled=${correct_length_reward_enabled:-True}
 correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
+length_reward_scope=${length_reward_scope:-all}  # "correct" | "all"
+case "${length_reward_scope}" in
+    correct|all)
+        ;;
+    *)
+        echo "length_reward_scope must be correct or all, got: ${length_reward_scope}" >&2
+        exit 1
+        ;;
+esac
 case "${correct_length_reward_enabled}" in
     True|true|1)
-        length_reward_tag="len${correct_length_reward_min_factor}-dyncache"
+        length_reward_tag="len${correct_length_reward_min_factor}-dyncache-${length_reward_scope}"
         ;;
     False|false|0)
         length_reward_tag="nolen"
@@ -190,4 +199,5 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.v2_slope_threshold=${v2_slope_threshold} \
     +trainer.correct_length_reward_enabled=${correct_length_reward_enabled} \
     +trainer.correct_length_reward_min_factor=${correct_length_reward_min_factor} \
+    +trainer.length_reward_scope=${length_reward_scope} \
     +trainer.wandb_run_id="${wandb_run_id}"

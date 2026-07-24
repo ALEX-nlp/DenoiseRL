@@ -1,9 +1,9 @@
-"""Dynamic cutdown-aware length shaping for correct DenoiseRL v2 rollouts.
+"""Dynamic cutdown-aware length shaping for DenoiseRL v2 rollouts.
 
 For a prefix of length ``p`` and generation budget ``R``, cutdown can keep at
-most ``R - p`` generated tokens. Correct rollouts keep their full reward up to
-that boundary. The following ``p`` generated tokens form a per-sample dynamic
-cache in which the reward decreases linearly to ``min_factor``.
+most ``R - p`` generated tokens. Rollouts keep their full reward up to that
+boundary. The following ``p`` generated tokens form a per-sample dynamic cache
+in which the configured samples receive a linearly increasing penalty.
 """
 
 import math
@@ -58,16 +58,18 @@ def dynamic_cutdown_length_factor(
     return 1.0 - (1.0 - min_factor) * cache_progress
 
 
-def apply_correct_length_reward(
+def apply_dynamic_length_reward(
     reward_tensor: torch.Tensor,
     *,
     correctness: torch.Tensor,
     response_lengths: torch.Tensor,
     prefix_lengths: torch.Tensor,
+    reward_positions: torch.Tensor,
     max_response_length: int,
     min_factor: float = 0.0,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Scale correct rollout rewards by their dynamic cutdown length factor.
+    scope: str = "correct",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply the dynamic cutdown penalty to correct or all rollouts.
 
     Args:
         reward_tensor: Token-level rewards with batch as the first dimension.
@@ -77,16 +79,26 @@ def apply_correct_length_reward(
             prefix is folded into the response window.
         prefix_lengths: Injected prefix length for each rollout. This is also the
             row's dynamic cache length.
+        reward_positions: Response-column index at which to place the sequence-level
+            additive penalty for each rollout.
         max_response_length: Policy generation budget.
         min_factor: Factor at ``max_response_length`` for rows with a non-zero
             prefix. Rows without a prefix keep factor ``1.0``.
+        scope: ``"correct"`` applies the penalty only when correctness is positive;
+            ``"all"`` applies it to every rollout.
 
     Returns:
-        ``(shaped_reward_tensor, effective_factors)``. Effective factors are
-        ``1.0`` for incorrect rollouts because their rewards are left unchanged.
+        ``(shaped_reward_tensor, effective_factors, effective_penalties)``.
     """
     if reward_tensor.ndim < 1:
         raise ValueError("reward_tensor must have a batch dimension.")
+    if reward_tensor.ndim != 2:
+        raise ValueError(
+            f"reward_tensor must be 2D, got shape {tuple(reward_tensor.shape)}."
+        )
+    scope = str(scope).lower()
+    if scope not in ("correct", "all"):
+        raise ValueError(f"scope must be 'correct' or 'all', got {scope!r}.")
 
     batch_size = reward_tensor.shape[0]
     correctness_t = torch.as_tensor(correctness, device=reward_tensor.device).reshape(-1)
@@ -95,6 +107,9 @@ def apply_correct_length_reward(
     ).reshape(-1)
     prefix_lengths_t = torch.as_tensor(
         prefix_lengths, device=reward_tensor.device
+    ).reshape(-1)
+    reward_positions_t = torch.as_tensor(
+        reward_positions, device=reward_tensor.device, dtype=torch.long
     ).reshape(-1)
     if correctness_t.numel() != batch_size:
         raise ValueError(
@@ -111,6 +126,17 @@ def apply_correct_length_reward(
             "prefix_lengths must have one value per reward row: "
             f"got {prefix_lengths_t.numel()} for batch size {batch_size}."
         )
+    if reward_positions_t.numel() != batch_size:
+        raise ValueError(
+            "reward_positions must have one value per reward row: "
+            f"got {reward_positions_t.numel()} for batch size {batch_size}."
+        )
+    if torch.any(reward_positions_t < 0) or torch.any(
+        reward_positions_t >= reward_tensor.shape[1]
+    ):
+        raise ValueError(
+            f"reward_positions must be in [0, {reward_tensor.shape[1] - 1}]."
+        )
     if not torch.isfinite(correctness_t.to(torch.float32)).all():
         raise ValueError("correctness must contain only finite values.")
 
@@ -121,9 +147,18 @@ def apply_correct_length_reward(
         min_factor=min_factor,
     ).to(device=reward_tensor.device, dtype=reward_tensor.dtype)
     correct_mask = correctness_t > 0
-    effective_factors = torch.where(
-        correct_mask, factors, torch.ones_like(factors)
+    apply_mask = (
+        torch.ones_like(correct_mask, dtype=torch.bool)
+        if scope == "all"
+        else correct_mask
     )
-    broadcast_shape = (batch_size,) + (1,) * (reward_tensor.ndim - 1)
-    shaped_reward = reward_tensor * effective_factors.reshape(broadcast_shape)
-    return shaped_reward, effective_factors
+    raw_penalties = 1.0 - factors
+    effective_penalties = torch.where(
+        apply_mask, raw_penalties, torch.zeros_like(raw_penalties)
+    )
+    effective_factors = 1.0 - effective_penalties
+
+    shaped_reward = reward_tensor.clone()
+    row_indices = torch.arange(batch_size, device=reward_tensor.device)
+    shaped_reward[row_indices, reward_positions_t] -= effective_penalties
+    return shaped_reward, effective_factors, effective_penalties

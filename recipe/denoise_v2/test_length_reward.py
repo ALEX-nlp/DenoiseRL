@@ -3,7 +3,7 @@ import unittest
 import torch
 
 from recipe.denoise_v2.length_reward import (
-    apply_correct_length_reward,
+    apply_dynamic_length_reward,
     dynamic_cutdown_length_factor,
 )
 
@@ -66,7 +66,7 @@ class DynamicCutdownLengthFactorTest(unittest.TestCase):
             )
 
 
-class ApplyCorrectLengthRewardTest(unittest.TestCase):
+class ApplyDynamicLengthRewardTest(unittest.TestCase):
     def test_only_correct_rollouts_are_scaled(self):
         rewards = torch.tensor(
             [
@@ -76,12 +76,14 @@ class ApplyCorrectLengthRewardTest(unittest.TestCase):
             ]
         )
 
-        shaped, effective_factors = apply_correct_length_reward(
+        shaped, effective_factors, effective_penalties = apply_dynamic_length_reward(
             rewards,
             correctness=torch.tensor([1.0, 1.0, 0.0]),
             response_lengths=torch.tensor([3296, 4096, 4096]),
             prefix_lengths=torch.tensor([800, 800, 800]),
+            reward_positions=torch.tensor([1, 1, 1]),
             max_response_length=4096,
+            scope="correct",
         )
 
         torch.testing.assert_close(
@@ -97,25 +99,71 @@ class ApplyCorrectLengthRewardTest(unittest.TestCase):
         torch.testing.assert_close(
             effective_factors, torch.tensor([1.0, 0.0, 1.0])
         )
+        torch.testing.assert_close(
+            effective_penalties, torch.tensor([0.0, 1.0, 0.0])
+        )
 
     def test_requires_one_length_and_correctness_value_per_row(self):
         with self.assertRaisesRegex(ValueError, "one value per reward row"):
-            apply_correct_length_reward(
+            apply_dynamic_length_reward(
                 torch.zeros(2, 4),
                 correctness=torch.tensor([1.0]),
                 response_lengths=torch.tensor([1, 2]),
                 prefix_lengths=torch.tensor([1, 2]),
+                reward_positions=torch.tensor([0, 0]),
                 max_response_length=4,
             )
 
     def test_requires_one_prefix_length_per_row(self):
         with self.assertRaisesRegex(ValueError, "prefix_lengths"):
-            apply_correct_length_reward(
+            apply_dynamic_length_reward(
                 torch.zeros(2, 4),
                 correctness=torch.tensor([1.0, 1.0]),
                 response_lengths=torch.tensor([1, 2]),
                 prefix_lengths=torch.tensor([1]),
+                reward_positions=torch.tensor([0, 0]),
                 max_response_length=4,
+            )
+
+    def test_all_scope_gives_incorrect_rollouts_negative_reward(self):
+        rewards = torch.zeros(2, 3)
+
+        shaped, effective_factors, effective_penalties = apply_dynamic_length_reward(
+            rewards,
+            correctness=torch.tensor([0.0, 0.0]),
+            response_lengths=torch.tensor([3296, 4096]),
+            prefix_lengths=torch.tensor([800, 800]),
+            reward_positions=torch.tensor([1, 2]),
+            max_response_length=4096,
+            scope="all",
+        )
+
+        torch.testing.assert_close(
+            shaped,
+            torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0],
+                ]
+            ),
+        )
+        torch.testing.assert_close(
+            effective_factors, torch.tensor([1.0, 0.0])
+        )
+        torch.testing.assert_close(
+            effective_penalties, torch.tensor([0.0, 1.0])
+        )
+
+    def test_rejects_unknown_scope(self):
+        with self.assertRaisesRegex(ValueError, "scope"):
+            apply_dynamic_length_reward(
+                torch.zeros(1, 2),
+                correctness=torch.tensor([1.0]),
+                response_lengths=torch.tensor([2]),
+                prefix_lengths=torch.tensor([1]),
+                reward_positions=torch.tensor([1]),
+                max_response_length=2,
+                scope="unknown",
             )
 
 
