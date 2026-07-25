@@ -25,7 +25,7 @@ v2_slope_threshold=${v2_slope_threshold:-0.02}
 # Prefix length p defines a dynamic cache: no penalty through R-p generated
 # tokens, then a linear penalty over the final p. Scope selects correct vs. all.
 correct_length_reward_enabled=${correct_length_reward_enabled:-True}
-correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
+correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.9}
 length_reward_scope=${length_reward_scope:-all}  # "correct" | "all"
 response_clip_reward_penalty=${response_clip_reward_penalty:-0.0}
 case "${response_clip_reward_penalty}" in
@@ -46,7 +46,7 @@ case "${length_reward_scope}" in
 esac
 case "${correct_length_reward_enabled}" in
     True|true|1)
-        length_reward_tag="len${correct_length_reward_min_factor}-dyncache-${length_reward_scope}"
+        length_reward_tag="len${correct_length_reward_min_factor}-dyn-${length_reward_scope}"
         ;;
     False|false|0)
         length_reward_tag="nolen"

@@ -37,7 +37,7 @@ case "${length_reward_scope}" in
 esac
 case "${correct_length_reward_enabled}" in
     True|true|1)
-        length_reward_tag="len${correct_length_reward_min_factor}-dyncache-${length_reward_scope}"
+        length_reward_tag="len${correct_length_reward_min_factor}-dyn-${length_reward_scope}"
         ;;
     False|false|0)
         length_reward_tag="nolen"
