@@ -100,7 +100,7 @@ MODEL_PATH=${MODEL_PATH:-../Model/Qwen/${model_name}}
 TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen2.5-1.5b.parquet}
 TEST_FILE=${TEST_FILE:-'["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]'}
 
-run_tag="rho${v2_initial_rho}-${v2_max_rho}_target${v2_target_accuracy}_alpha${v2_alpha}_window${v2_history_window}_slope${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}"
+run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}"
 experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}

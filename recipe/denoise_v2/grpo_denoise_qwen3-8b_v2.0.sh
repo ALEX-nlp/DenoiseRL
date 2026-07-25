@@ -13,8 +13,8 @@ effective_rollout_n=16
 # replacements inherit the post-update mean rho N of the previous active batch.
 v2_initial_rho=${v2_initial_rho:-0.0}
 v2_min_rho=${v2_min_rho:-0.0}
-v2_max_rho=${v2_max_rho:-0.8}
-v2_target_accuracy=${v2_target_accuracy:-0.8}
+v2_max_rho=${v2_max_rho:-0.5}
+v2_target_accuracy=${v2_target_accuracy:-0.75}
 v2_alpha=${v2_alpha:-0.2}
 v2_history_window=${v2_history_window:-5}
 v2_min_history=${v2_min_history:-2}
@@ -24,7 +24,7 @@ v2_slope_threshold=${v2_slope_threshold:-0.02}
 
 # Prefix length p defines a dynamic cache: no penalty through R-p generated
 # tokens, then a linear penalty over the final p. Scope selects correct vs. all.
-correct_length_reward_enabled=${correct_length_reward_enabled:-True}
+correct_length_reward_enabled=${correct_length_reward_enabled:-False}
 correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
 length_reward_scope=${length_reward_scope:-all}  # "correct" | "all"
 case "${length_reward_scope}" in
