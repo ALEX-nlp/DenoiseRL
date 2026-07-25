@@ -66,7 +66,10 @@ from tqdm import tqdm
 
 import verl.utils.torch_functional as verl_F
 from recipe.denoise_v2.dynamic_rho import DynamicRhoController
-from recipe.denoise_v2.length_reward import apply_dynamic_length_reward
+from recipe.denoise_v2.length_reward import (
+    apply_dynamic_length_reward,
+    apply_response_clip_penalty,
+)
 from recipe.denoise_v2.noise_metrics import compute_paired_noise_acc_metrics
 from recipe.denoise_v2.per_sample_curriculum import (
     PerSampleNoiseCurriculum,
@@ -734,7 +737,31 @@ class RayDAPOTrainer(RayPPOTrainer):
                     prev_step_profile = curr_step_profile
                     curr_step_profile = next_step_profile
 
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                response_clip_lengths = None
+                response_clip_max_length = None
+                if (
+                    str(self.config.trainer.get("partial_mode", "shift")).lower()
+                    == "none"
+                ):
+                    response_clip_lengths = batch.non_tensor_batch.get(
+                        "generated_response_length"
+                    )
+                    if response_clip_lengths is None:
+                        raise RuntimeError(
+                            "partial_mode='none' requires generated_response_length "
+                            "for continuation-only response clip metrics."
+                        )
+                    response_clip_max_length = int(
+                        self.config.data.max_response_length
+                    )
+                metrics.update(
+                    compute_data_metrics(
+                        batch=batch,
+                        use_critic=self.use_critic,
+                        response_clip_lengths=response_clip_lengths,
+                        response_clip_max_length=response_clip_max_length,
+                    )
+                )
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
@@ -1504,6 +1531,17 @@ class RayDAPOTrainer(RayPPOTrainer):
         k = int(self.config.trainer.get("sub_rollout_k", 0))
         if k < 0:
             raise ValueError(f"trainer.sub_rollout_k must be >= 0, got {k}.")
+        response_clip_reward_penalty = float(
+            self.config.trainer.get("response_clip_reward_penalty", 0.0)
+        )
+        if (
+            not math.isfinite(response_clip_reward_penalty)
+            or response_clip_reward_penalty < 0.0
+        ):
+            raise ValueError(
+                "trainer.response_clip_reward_penalty must be finite and "
+                f"non-negative, got {response_clip_reward_penalty}."
+            )
         noise_source = str(self.config.trainer.get("noise_source", "partial_wrong")).lower()
         if noise_source not in ("partial_wrong", "random_tokens"):
             raise ValueError(
@@ -1784,6 +1822,9 @@ class RayDAPOTrainer(RayPPOTrainer):
         generated_response_lengths = new_batch.batch["attention_mask"][
             :, -generated_response_width:
         ].sum(dim=-1)
+        new_batch.non_tensor_batch["generated_response_length"] = (
+            generated_response_lengths.detach().cpu().numpy()
+        )
 
         # Fold the noisy prefix into the response window. Three modes:
         #   * "shift":   response width = R, prefix gets response_mask = 1
@@ -1956,6 +1997,43 @@ class RayDAPOTrainer(RayPPOTrainer):
             reward_tensor, reward_extra_infos_dict = compute_reward(
                 new_batch, self.reward_fn, rollout_save_path=local_global_step_save_json
             )
+
+            _metrics["denoise/response_clip_reward/enabled"] = float(
+                response_clip_reward_penalty != 0.0
+            )
+            if response_clip_reward_penalty != 0.0:
+                visible_response_width = int(new_batch.batch["responses"].shape[1])
+                prompt_width = int(new_batch.batch["prompts"].shape[1])
+                visible_response_lengths = new_batch.batch["attention_mask"][
+                    :, prompt_width:
+                ].sum(dim=-1)
+                reward_positions = (visible_response_lengths - 1).clamp(
+                    min=0, max=visible_response_width - 1
+                )
+                reward_tensor, clipped_mask = apply_response_clip_penalty(
+                    reward_tensor,
+                    response_lengths=generated_response_lengths,
+                    reward_positions=reward_positions,
+                    max_response_length=generated_response_width,
+                    penalty=response_clip_reward_penalty,
+                )
+                n_clipped = int(clipped_mask.sum().item())
+                _metrics["denoise/response_clip_reward/penalty"] = (
+                    response_clip_reward_penalty
+                )
+                _metrics["denoise/response_clip_reward/n_clipped"] = float(
+                    n_clipped
+                )
+                _metrics["denoise/response_clip_reward/clip_ratio"] = float(
+                    clipped_mask.to(torch.float32).mean().item()
+                )
+                reward_extra_infos_dict["response_was_clipped"] = (
+                    clipped_mask.detach().cpu().tolist()
+                )
+                reward_extra_infos_dict["response_clip_reward"] = (
+                    -response_clip_reward_penalty
+                    * clipped_mask.to(torch.float32).detach().cpu()
+                ).tolist()
 
             length_reward_enabled = bool(
                 self.config.trainer.get("correct_length_reward_enabled", False)

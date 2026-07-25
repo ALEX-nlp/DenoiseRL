@@ -17,7 +17,7 @@ Metrics related to the PPO trainer.
 
 from collections import defaultdict
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -77,7 +77,12 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     )
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
+def compute_data_metrics(
+    batch: DataProto,
+    use_critic: bool = True,
+    response_clip_lengths: Optional[torch.Tensor] = None,
+    response_clip_max_length: Optional[int] = None,
+) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -88,6 +93,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     Args:
         batch: A DataProto object containing batch data with token-level scores, rewards, advantages, etc.
         use_critic: Whether to include critic-specific metrics. Defaults to True.
+        response_clip_lengths: Optional per-row lengths used only for response
+            clip-ratio metrics. By default, use response attention lengths.
+        response_clip_max_length: Maximum length paired with
+            ``response_clip_lengths``. Required when the override is provided.
 
     Returns:
         A dictionary of metrics including:
@@ -117,6 +126,26 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     response_info = _compute_response_info(batch)
     prompt_length = response_info["prompt_length"]
     response_length = response_info["response_length"]
+    if response_clip_lengths is None:
+        clip_response_length = response_length
+        clip_max_response_length = max_response_length
+    else:
+        if response_clip_max_length is None or response_clip_max_length <= 0:
+            raise ValueError(
+                "response_clip_max_length must be > 0 when "
+                "response_clip_lengths is provided."
+            )
+        clip_response_length = torch.as_tensor(
+            response_clip_lengths,
+            device=response_length.device,
+            dtype=response_length.dtype,
+        ).reshape(-1)
+        if clip_response_length.numel() != response_length.numel():
+            raise ValueError(
+                "response_clip_lengths must have one value per response row: "
+                f"got {clip_response_length.numel()} for {response_length.numel()} rows."
+            )
+        clip_max_response_length = int(response_clip_max_length)
 
     aborted_mask = (response_length == 0).bool()
     non_aborted_mask = ~aborted_mask
@@ -146,15 +175,28 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     aborted_ratio = torch.mean(aborted_mask.float()).detach().item()
 
     non_aborted_response_length = response_length[non_aborted_mask]
+    non_aborted_clip_response_length = clip_response_length[
+        clip_response_length > 0
+    ]
     if non_aborted_response_length.numel() > 0:
         non_aborted_response_length_mean = torch.mean(non_aborted_response_length).detach().item()
         non_aborted_response_length_max = torch.max(non_aborted_response_length).detach().item()
         non_aborted_response_length_min = torch.min(non_aborted_response_length).detach().item()
-        non_aborted_response_length_clip_ratio = (
-            torch.mean(torch.eq(non_aborted_response_length, max_response_length).float()).detach().item()
-        )
     else:
         raise ValueError("All samples are aborted, this should not happen.")
+    if non_aborted_clip_response_length.numel() > 0:
+        non_aborted_response_clip_ratio = (
+            torch.mean(
+                torch.eq(
+                    non_aborted_clip_response_length,
+                    clip_max_response_length,
+                ).float()
+            )
+            .detach()
+            .item()
+        )
+    else:
+        non_aborted_response_clip_ratio = 0.0
 
     metrics = {
         # score
@@ -189,15 +231,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "response_length/mean": torch.mean(response_length).detach().item(),
         "response_length/max": torch.max(response_length).detach().item(),
         "response_length/min": torch.min(response_length).detach().item(),
-        "response_length/clip_ratio": torch.mean(torch.eq(response_length, max_response_length).float())
-        .detach()
-        .item(),
         # response length (non-aborted only)
         # These statistics exclude aborted samples to avoid skew from zeros
         "response_length_non_aborted/mean": non_aborted_response_length_mean,
         "response_length_non_aborted/max": non_aborted_response_length_max,
         "response_length_non_aborted/min": non_aborted_response_length_min,
-        "response_length_non_aborted/clip_ratio": non_aborted_response_length_clip_ratio,
         # aborted ratio
         # Fraction of samples whose response length is zero
         "response/aborted_ratio": aborted_ratio,
@@ -207,6 +245,16 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+    metrics["response_length/clip_ratio"] = (
+        torch.mean(
+            torch.eq(clip_response_length, clip_max_response_length).float()
+        )
+        .detach()
+        .item()
+    )
+    metrics["response_length_non_aborted/clip_ratio"] = (
+        non_aborted_response_clip_ratio
+    )
 
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:

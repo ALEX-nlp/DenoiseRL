@@ -162,3 +162,68 @@ def apply_dynamic_length_reward(
     row_indices = torch.arange(batch_size, device=reward_tensor.device)
     shaped_reward[row_indices, reward_positions_t] -= effective_penalties
     return shaped_reward, effective_factors, effective_penalties
+
+
+def apply_response_clip_penalty(
+    reward_tensor: torch.Tensor,
+    *,
+    response_lengths: torch.Tensor,
+    reward_positions: torch.Tensor,
+    max_response_length: int,
+    penalty: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Subtract a fixed reward from rollouts that exhaust the generation budget.
+
+    ``response_lengths`` must describe the policy-generated continuation before
+    any DenoiseRL prefix folding. A row is treated as clipped when its generated
+    length reaches ``max_response_length``.
+
+    Returns:
+        ``(shaped_reward_tensor, clipped_mask)``.
+    """
+    if reward_tensor.ndim != 2:
+        raise ValueError(
+            f"reward_tensor must be 2D, got shape {tuple(reward_tensor.shape)}."
+        )
+    if max_response_length <= 0:
+        raise ValueError(
+            f"max_response_length must be > 0, got {max_response_length}."
+        )
+    if not math.isfinite(penalty) or penalty < 0.0:
+        raise ValueError(f"penalty must be finite and non-negative, got {penalty}.")
+
+    batch_size = reward_tensor.shape[0]
+    response_lengths_t = torch.as_tensor(
+        response_lengths, device=reward_tensor.device
+    ).reshape(-1)
+    reward_positions_t = torch.as_tensor(
+        reward_positions, device=reward_tensor.device, dtype=torch.long
+    ).reshape(-1)
+    if response_lengths_t.numel() != batch_size:
+        raise ValueError(
+            "response_lengths must have one value per reward row: "
+            f"got {response_lengths_t.numel()} for batch size {batch_size}."
+        )
+    if reward_positions_t.numel() != batch_size:
+        raise ValueError(
+            "reward_positions must have one value per reward row: "
+            f"got {reward_positions_t.numel()} for batch size {batch_size}."
+        )
+    if not torch.isfinite(response_lengths_t.to(torch.float32)).all():
+        raise ValueError("response_lengths must contain only finite values.")
+    if torch.any(response_lengths_t < 0):
+        raise ValueError("response_lengths must be non-negative.")
+    if torch.any(reward_positions_t < 0) or torch.any(
+        reward_positions_t >= reward_tensor.shape[1]
+    ):
+        raise ValueError(
+            f"reward_positions must be in [0, {reward_tensor.shape[1] - 1}]."
+        )
+
+    clipped_mask = response_lengths_t >= max_response_length
+    shaped_reward = reward_tensor.clone()
+    row_indices = torch.arange(batch_size, device=reward_tensor.device)
+    shaped_reward[row_indices, reward_positions_t] -= (
+        clipped_mask.to(reward_tensor.dtype) * penalty
+    )
+    return shaped_reward, clipped_mask

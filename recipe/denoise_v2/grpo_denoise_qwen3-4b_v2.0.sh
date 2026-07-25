@@ -27,6 +27,15 @@ v2_slope_threshold=${v2_slope_threshold:-0.02}
 correct_length_reward_enabled=${correct_length_reward_enabled:-True}
 correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
 length_reward_scope=${length_reward_scope:-all}  # "correct" | "all"
+response_clip_reward_penalty=${response_clip_reward_penalty:-0.0}
+case "${response_clip_reward_penalty}" in
+    0|0.0|0.00|0.000|0e0|0E0)
+        response_clip_reward_tag=""
+        ;;
+    *)
+        response_clip_reward_tag="_clipreward${response_clip_reward_penalty}"
+        ;;
+esac
 case "${length_reward_scope}" in
     correct|all)
         ;;
@@ -91,7 +100,7 @@ MODEL_PATH=${MODEL_PATH:-../Model/Qwen/${model_name}}
 TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen2.5-1.5b.parquet}
 TEST_FILE=${TEST_FILE:-'["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]'}
 
-run_tag="rho${v2_initial_rho}-${v2_max_rho}_target${v2_target_accuracy}_alpha${v2_alpha}_window${v2_history_window}_slope${v2_slope_threshold}_${length_reward_tag}"
+run_tag="rho${v2_initial_rho}-${v2_max_rho}_target${v2_target_accuracy}_alpha${v2_alpha}_window${v2_history_window}_slope${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}"
 experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
@@ -200,4 +209,5 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.correct_length_reward_enabled=${correct_length_reward_enabled} \
     +trainer.correct_length_reward_min_factor=${correct_length_reward_min_factor} \
     +trainer.length_reward_scope=${length_reward_scope} \
+    +trainer.response_clip_reward_penalty=${response_clip_reward_penalty} \
     +trainer.wandb_run_id="${wandb_run_id}"

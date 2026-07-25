@@ -4,6 +4,7 @@ import torch
 
 from recipe.denoise_v2.length_reward import (
     apply_dynamic_length_reward,
+    apply_response_clip_penalty,
     dynamic_cutdown_length_factor,
 )
 
@@ -164,6 +165,49 @@ class ApplyDynamicLengthRewardTest(unittest.TestCase):
                 reward_positions=torch.tensor([1]),
                 max_response_length=2,
                 scope="unknown",
+            )
+
+
+class ApplyResponseClipPenaltyTest(unittest.TestCase):
+    def test_only_responses_at_generation_limit_are_penalized(self):
+        rewards = torch.tensor(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, -0.5, 0.0],
+            ]
+        )
+
+        shaped, clipped_mask = apply_response_clip_penalty(
+            rewards,
+            response_lengths=torch.tensor([3, 2, 3]),
+            reward_positions=torch.tensor([1, 2, 1]),
+            max_response_length=3,
+            penalty=0.25,
+        )
+
+        torch.testing.assert_close(
+            shaped,
+            torch.tensor(
+                [
+                    [0.0, 0.75, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, -0.75, 0.0],
+                ]
+            ),
+        )
+        torch.testing.assert_close(
+            clipped_mask, torch.tensor([True, False, True])
+        )
+
+    def test_rejects_negative_penalty(self):
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            apply_response_clip_penalty(
+                torch.zeros(1, 2),
+                response_lengths=torch.tensor([2]),
+                reward_positions=torch.tensor([1]),
+                max_response_length=2,
+                penalty=-1.0,
             )
 
 
