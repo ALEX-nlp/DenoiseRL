@@ -11,6 +11,9 @@ effective_rollout_n=16
 
 # Every prompt owns an independent rho. The first active batch starts at zero;
 # replacements inherit the post-update mean rho N of the previous active batch.
+noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
+max_random_token=${max_random_token:-2048}
+random_noise_exclude_special=${random_noise_exclude_special:-True}
 v2_initial_rho=${v2_initial_rho:-0.0}
 v2_min_rho=${v2_min_rho:-0.0}
 v2_max_rho=${v2_max_rho:-0.5}
@@ -92,15 +95,20 @@ use_dynamic_bsz=${use_dynamic_bsz:-True}
 actor_ppo_max_token_len=$((2 * (max_prompt_length + max_response_length)))
 infer_ppo_max_token_len=$((2 * (max_prompt_length + max_response_length)))
 
-# Data stays in file order. Python first removes rows without a usable
-# wrong_answer_with_boxed, treats the remaining rows as one pool, and explicitly
-# selects active indices beginning with [0, train_prompt_bsz).
+# Data stays in file order. partial_wrong removes rows without a usable
+# wrong_answer_with_boxed; random_tokens keeps the full pool. Both modes select
+# active indices beginning with [0, train_prompt_bsz).
 RAY_DATA_HOME=${RAY_DATA_HOME:-.}
 MODEL_PATH=${MODEL_PATH:-../Model/Qwen/${model_name}}
 TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen2.5-1.5b.parquet}
 TEST_FILE=${TEST_FILE:-'["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]'}
 
-run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}"
+if [[ "${noise_source}" == "random_tokens" ]]; then
+    noise_run_tag="_random-max${max_random_token}"
+else
+    noise_run_tag=""
+fi
+run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}${noise_run_tag}"
 experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
@@ -188,7 +196,9 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.max_actor_ckpt_to_keep=1 \
     +trainer.use_dapo=False \
     +trainer.sub_rollout_k=${sub_rollout_k} \
-    +trainer.noise_source=partial_wrong \
+    +trainer.noise_source=${noise_source} \
+    +trainer.max_random_token=${max_random_token} \
+    +trainer.random_noise_exclude_special=${random_noise_exclude_special} \
     +trainer.partial_wrong_cut_strategy=token \
     +trainer.part_response_ratio_strategy=fixed \
     +trainer.partial_mode=none \

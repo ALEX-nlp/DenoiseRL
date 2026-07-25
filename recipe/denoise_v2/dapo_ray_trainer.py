@@ -21,10 +21,12 @@ trajectories per prompt:
 * ``K`` "sub" rollouts: continuation from a noisy assistant prefix. By default
   (``trainer.noise_source = "partial_wrong"``), the prefix is drawn from a partial
   wrong solution in the ``wrong_answer_with_boxed`` column (produced by
-  ``data_prepare.py``). When ``trainer.noise_source = "random_tokens"``, the prefix is
-  ``trainer.random_noise_len`` random tokenizer ids sampled from the tokenizer
-  vocabulary. The noisy tokens are appended to the prompt as an assistant prefix so
-  the policy continues writing from that prefix.
+  ``data_prepare.py``). When ``trainer.noise_source = "random_tokens"``, fixed mode
+  uses ``trainer.random_noise_len`` tokenizer ids. DenoiseRL v2 instead uses each
+  problem's curriculum ratio and prepends
+  ``floor(trainer.max_random_token * rho)`` random ids. The noisy tokens are
+  appended to the prompt as an assistant prefix so the policy continues writing
+  from that prefix.
 
 For sub-rollouts, the noisy prefix is folded into the response window after
 generation. ``trainer.partial_mode`` selects one of three behaviors:
@@ -76,6 +78,7 @@ from recipe.denoise_v2.per_sample_curriculum import (
     has_usable_wrong_solution,
 )
 from recipe.denoise_v2.prefix_cut import cut_wrong_solution_prefix
+from recipe.denoise_v2.random_token_noise import scaled_random_token_count
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
@@ -322,8 +325,8 @@ class RayDAPOTrainer(RayPPOTrainer):
 
     * ``"partial_wrong"`` (default): first ``part_response_ratio`` of a row drawn
       from ``wrong_answer_with_boxed``.
-    * ``"random_tokens"``: ``random_noise_len`` random tokenizer ids sampled from
-      the tokenizer vocabulary.
+    * ``"random_tokens"``: fixed mode samples ``random_noise_len`` ids; v2 samples
+      ``floor(max_random_token * rho)`` ids using the per-problem curriculum ratio.
 
     After rollout the noisy prefix is folded
     into the response window per ``trainer.partial_mode``:
@@ -358,12 +361,27 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         ensure_problem_ids_on_dataset(self.train_dataset)
         dataframe = self.train_dataset.dataframe
+        noise_source = str(
+            self.config.trainer.get("noise_source", "partial_wrong")
+        ).lower()
+        original_size = len(dataframe)
+        if noise_source == "random_tokens":
+            # Random-token noise does not need wrong_answer_with_boxed. Preserve the
+            # complete ordered pool and avoid rebuilding an identical dataloader.
+            self._v2_pool_filtered = True
+            self._v2_pool_original_size = original_size
+            self._v2_pool_removed_count = 0
+            print(
+                "[denoise v2] random-token noise keeps the complete ordered pool: "
+                f"pool_size={original_size}."
+            )
+            return
+
         kept_indices = [
             index
             for index, item in enumerate(dataframe)
             if has_usable_wrong_solution(item.get("wrong_answer_with_boxed", None))
         ]
-        original_size = len(dataframe)
         removed_count = original_size - len(kept_indices)
         train_batch_size = int(self.config.data.train_batch_size)
         if len(kept_indices) < train_batch_size:
@@ -466,8 +484,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                 "DenoiseRL v2 requires exactly 16 noise rollouts per problem: "
                 "actor_rollout_ref.rollout.n=0 and trainer.sub_rollout_k=16."
             )
-        if str(self.config.trainer.get("noise_source", "partial_wrong")).lower() != "partial_wrong":
-            raise ValueError("DenoiseRL v2 requires trainer.noise_source='partial_wrong'.")
+        noise_source = str(
+            self.config.trainer.get("noise_source", "partial_wrong")
+        ).lower()
+        if noise_source not in ("partial_wrong", "random_tokens"):
+            raise ValueError(
+                "DenoiseRL v2 requires trainer.noise_source to be "
+                f"'partial_wrong' or 'random_tokens', got {noise_source!r}."
+            )
         if bool(self.config.trainer.get("use_dapo", False)):
             raise ValueError("trainer.use_dapo is incompatible with the v2 active batch.")
 
@@ -927,16 +951,24 @@ class RayDAPOTrainer(RayPPOTrainer):
         return bool(raw)
 
     def _make_random_token_sampler(self):
-        """Build a zero-arg sampler for random token prefixes.
+        """Build a sampler for random token prefixes.
 
-        ``trainer.random_noise_len`` is measured in tokenizer ids. Special tokens are
-        excluded by default so the noise stays inside the model's normal text token
-        vocabulary instead of sampling PAD/EOS/chat-control ids.
+        Fixed mode defaults to ``trainer.random_noise_len`` ids. DenoiseRL v2
+        defaults to ``trainer.max_random_token`` ids as the upper bound and passes
+        each per-problem scaled length into the sampler. Special tokens are excluded
+        by default so noise stays inside the model's normal text vocabulary.
         """
         cfg = self.config.trainer
-        noise_len = int(cfg.get("random_noise_len", 512))
-        if noise_len <= 0:
-            raise ValueError(f"trainer.random_noise_len must be > 0, got {noise_len}.")
+        if self._v2_enabled():
+            configured_noise_len = int(cfg.get("max_random_token", 2048))
+            config_name = "max_random_token"
+        else:
+            configured_noise_len = int(cfg.get("random_noise_len", 512))
+            config_name = "random_noise_len"
+        if configured_noise_len <= 0:
+            raise ValueError(
+                f"trainer.{config_name} must be > 0, got {configured_noise_len}."
+            )
 
         try:
             vocab_size = len(self.tokenizer)
@@ -968,11 +1000,23 @@ class RayDAPOTrainer(RayPPOTrainer):
             )
         rng = np.random.default_rng()
 
-        def _sample_random_tokens() -> List[int]:
+        def _sample_random_tokens(noise_len: Optional[int] = None) -> List[int]:
+            noise_len = (
+                configured_noise_len if noise_len is None else int(noise_len)
+            )
+            if noise_len <= 0:
+                raise ValueError(
+                    f"random token sample length must be > 0, got {noise_len}."
+                )
             idxs = rng.integers(0, candidate_ids.size, size=noise_len)
             return candidate_ids[idxs].astype(np.int64).tolist()
 
-        return _sample_random_tokens, noise_len, int(candidate_ids.size), exclude_special
+        return (
+            _sample_random_tokens,
+            configured_noise_len,
+            int(candidate_ids.size),
+            exclude_special,
+        )
 
     def _build_token_prefixed_inputs(
         self,
@@ -1558,7 +1602,8 @@ class RayDAPOTrainer(RayPPOTrainer):
             )
 
         # Sub-rollouts draw a fresh prefix per slot. Partial-wrong uses the existing
-        # token-ratio sampler; random-tokens samples tokenizer ids directly.
+        # token-ratio sampler. Random-tokens uses a fixed length outside v2 and
+        # floor(max_random_token * per_problem_rho) inside v2.
         sample_part_response_ratio = None
         sample_random_tokens = None
         random_noise_len = 0
@@ -1603,11 +1648,14 @@ class RayDAPOTrainer(RayPPOTrainer):
         pad_token_id = self.tokenizer.pad_token_id
 
         problem_ids = new_batch.non_tensor_batch.get("problem_id", None)
-        if k > 0 and noise_source == "partial_wrong" and problem_ids is None:
+        if (
+            k > 0
+            and (noise_source == "partial_wrong" or self._v2_enabled())
+            and problem_ids is None
+        ):
             raise ValueError(
-                "noise_source='partial_wrong' with sub_rollout_k > 0 requires "
-                "'problem_id' in the non-tensor batch "
-                "so that wrong_answer_with_boxed can be fetched from self.all_train_items."
+                "DenoiseRL noisy sub-rollouts require 'problem_id' in the "
+                "non-tensor batch to resolve per-problem noise state."
             )
         raw_prompt_messages = new_batch.non_tensor_batch.get("raw_prompt", None)
 
@@ -1628,6 +1676,8 @@ class RayDAPOTrainer(RayPPOTrainer):
         problems_without_wrongs = 0
         part_response_ratio_samples: List[float] = []
         realized_part_response_ratio_samples: List[float] = []
+        random_noise_ratio_samples: List[float] = []
+        random_noise_len_samples: List[int] = []
         n_line_boundary_prefixes = 0
         n_line_boundary_fallbacks = 0
 
@@ -1739,9 +1789,36 @@ class RayDAPOTrainer(RayPPOTrainer):
                             else:
                                 n_line_boundary_fallbacks += 1
                     else:
+                        random_token_count = random_noise_len
+                        if problem_rho is not None:
+                            slot_rho = float(problem_rho)
+                            random_token_count = scaled_random_token_count(
+                                random_noise_len, slot_rho
+                            )
+                            random_noise_ratio_samples.append(slot_rho)
+                        random_noise_len_samples.append(random_token_count)
+                        if random_token_count == 0:
+                            flat_input_ids_rows.append(base_input_ids[b : b + 1])
+                            flat_attention_mask_rows.append(
+                                base_attention_mask[b : b + 1]
+                            )
+                            flat_position_ids_rows.append(
+                                base_position_ids[b : b + 1]
+                            )
+                            flat_raw_prompt_ids.append(
+                                list(base_raw_prompt_ids[b])
+                                if base_raw_prompt_ids is not None
+                                else []
+                            )
+                            partial_lens_flat.append(0)
+                            noise_rhos_flat.append(slot_rho)
+                            n_sub_rows_zero_noise += 1
+                            continue
                         ids, mask, pos, raw_ids, p_len = self._build_token_prefixed_inputs(
                             prompt_messages=prompt_messages,
-                            prefix_token_ids=sample_random_tokens(),
+                            prefix_token_ids=sample_random_tokens(
+                                random_token_count
+                            ),
                             max_prompt_length=max_prompt_length,
                             truncation=truncation,
                             pad_token_id=pad_token_id,
@@ -1921,21 +1998,56 @@ class RayDAPOTrainer(RayPPOTrainer):
             )
             if self._uses_dynamic_rho():
                 _metrics.update(self._get_dynamic_rho_controller().metrics())
-            if self._v2_enabled():
-                _metrics.update(self._init_v2_curriculum().metrics())
-                _metrics["denoise/v2/pool_original_size"] = float(
-                    self._v2_pool_original_size
-                )
-                _metrics["denoise/v2/pool_removed_without_noise"] = float(
-                    self._v2_pool_removed_count
-                )
         if noise_source == "random_tokens":
-            _metrics["denoise/sub_rollout/random_noise_len_tokens"] = float(random_noise_len)
+            _metrics["denoise/sub_rollout/random_noise_len_tokens"] = float(
+                random_noise_len
+            )
             _metrics["denoise/sub_rollout/random_noise_vocab_size"] = float(
                 random_noise_vocab_size
             )
             _metrics["denoise/sub_rollout/random_noise_exclude_special"] = float(
                 random_noise_exclude_special
+            )
+            _metrics["denoise/sub_rollout/random_noise_dynamic_enabled"] = float(
+                self._v2_enabled()
+            )
+            if self._v2_enabled():
+                _metrics["denoise/sub_rollout/max_random_token"] = float(
+                    random_noise_len
+                )
+            if random_noise_len_samples:
+                random_len_arr = np.asarray(
+                    random_noise_len_samples, dtype=np.float32
+                )
+                _metrics[
+                    "denoise/sub_rollout/random_noise_requested_len_mean"
+                ] = float(np.mean(random_len_arr))
+                _metrics[
+                    "denoise/sub_rollout/random_noise_requested_len_min"
+                ] = float(np.min(random_len_arr))
+                _metrics[
+                    "denoise/sub_rollout/random_noise_requested_len_max"
+                ] = float(np.max(random_len_arr))
+            if random_noise_ratio_samples:
+                random_ratio_arr = np.asarray(
+                    random_noise_ratio_samples, dtype=np.float32
+                )
+                _metrics["denoise/sub_rollout/random_noise_ratio_mean"] = float(
+                    np.mean(random_ratio_arr)
+                )
+                _metrics["denoise/sub_rollout/random_noise_ratio_min"] = float(
+                    np.min(random_ratio_arr)
+                )
+                _metrics["denoise/sub_rollout/random_noise_ratio_max"] = float(
+                    np.max(random_ratio_arr)
+                )
+        if self._v2_enabled():
+            _metrics.update(self._init_v2_curriculum().metrics())
+            _metrics["denoise/v2/pool_original_size"] = float(
+                self._v2_pool_original_size
+            )
+            _metrics["denoise/v2/pool_removed_without_noise"] = float(
+                self._v2_pool_removed_count
             )
         if n_sub_rows_with_prefix > 0:
             _metrics["denoise/sub_rollout/mean_partial_len"] = (

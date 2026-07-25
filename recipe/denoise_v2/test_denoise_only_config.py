@@ -6,6 +6,9 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).with_name("grpo_denoise_qwen3-4b_v2.0.sh")
 SCRIPT_8B_PATH = Path(__file__).with_name("grpo_denoise_qwen3-8b_v2.0.sh")
+RANDOM_TOKEN_SCRIPT_PATH = Path(__file__).with_name(
+    "grpo_denoise_random_tokens_qwen3-4b_v2.0.sh"
+)
 
 
 class DenoiseV2ConfigTest(unittest.TestCase):
@@ -88,6 +91,30 @@ class DenoiseV2ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.correct_length_reward_enabled=False", args)
         self.assertIn("+trainer.correct_length_reward_min_factor=0.7", args)
         self.assertIn("+trainer.length_reward_scope=correct", args)
+
+    def test_random_token_entrypoint_enables_dynamic_maximum(self):
+        result = self._expand_script(RANDOM_TOKEN_SCRIPT_PATH)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = result.stdout.splitlines()
+        self.assertIn("+trainer.noise_source=random_tokens", args)
+        self.assertIn("+trainer.max_random_token=2048", args)
+        self.assertIn("+trainer.random_noise_exclude_special=True", args)
+        self.assertIn("+trainer.v2_curriculum_enabled=True", args)
+        self.assertIn("+trainer.v2_initial_rho=0.0", args)
+        self.assertIn("+trainer.v2_max_rho=1.0", args)
+
+    def test_random_token_maximum_is_overridable(self):
+        result = self._expand_script(
+            RANDOM_TOKEN_SCRIPT_PATH,
+            max_random_token=1024,
+            v2_max_rho=0.75,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = result.stdout.splitlines()
+        self.assertIn("+trainer.max_random_token=1024", args)
+        self.assertIn("+trainer.v2_max_rho=0.75", args)
 
 
 if __name__ == "__main__":
