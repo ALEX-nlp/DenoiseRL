@@ -13,8 +13,11 @@ For a rollout whose final answer is already correct:
 2. Verify those boxes in order with the active reward manager.
 3. End the First Correct Solution (FCS) at the first correct box's closing
    brace.
-4. Compute `ERD = round(post_fcs_tokens / total_generated_tokens, 2)`.
-5. Scale the original accuracy reward by `1 - ERD`.
+4. Give the post-FCS continuation a configurable free-token allowance
+   (32 tokens by default).
+5. Compute
+   `ERD = round(max(post_fcs_tokens - tolerance_tokens, 0) / total_generated_tokens, 2)`.
+6. Scale the original accuracy reward by `1 - ERD`.
 
 Incorrect final rollouts, responses without a verifiably correct box among the
 retained candidates, and injected DenoiseRL prefix tokens are not shaped by
@@ -27,11 +30,13 @@ reward by default:
 first_correct_box_reward_enabled=True
 first_correct_box_max_boxes=10
 first_correct_box_erd_round_digits=2
+first_correct_box_tolerance_tokens=32
 correct_length_reward_enabled=False
 ```
 
 Every value can be overridden as an environment variable. Set
 `first_correct_box_reward_enabled=False` for the unshaped ablation.
+Set `first_correct_box_tolerance_tokens=0` to remove the free-token allowance.
 
 This implements the paper's FCA/external-redundancy component that targets
 post-answer continuation and repeated answers. The paper's separate

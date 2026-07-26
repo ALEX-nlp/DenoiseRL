@@ -34,6 +34,7 @@ response_clip_reward_penalty=${response_clip_reward_penalty:-0.0}
 first_correct_box_reward_enabled=${first_correct_box_reward_enabled:-True}
 first_correct_box_max_boxes=${first_correct_box_max_boxes:-10}
 first_correct_box_erd_round_digits=${first_correct_box_erd_round_digits:-2}
+first_correct_box_tolerance_tokens=${first_correct_box_tolerance_tokens:-32}
 case "${response_clip_reward_penalty}" in
     0|0.0|0.00|0.000|0e0|0E0)
         response_clip_reward_tag=""
@@ -64,7 +65,7 @@ case "${correct_length_reward_enabled}" in
 esac
 case "${first_correct_box_reward_enabled}" in
     True|true|1)
-        first_correct_box_reward_tag="fcb${first_correct_box_max_boxes}"
+        first_correct_box_reward_tag="fcb${first_correct_box_max_boxes}-tol${first_correct_box_tolerance_tokens}"
         ;;
     False|false|0)
         first_correct_box_reward_tag="nofcb"
@@ -238,4 +239,5 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v3.main_dapo \
     +trainer.first_correct_box_reward_enabled=${first_correct_box_reward_enabled} \
     +trainer.first_correct_box_max_boxes=${first_correct_box_max_boxes} \
     +trainer.first_correct_box_erd_round_digits=${first_correct_box_erd_round_digits} \
+    +trainer.first_correct_box_tolerance_tokens=${first_correct_box_tolerance_tokens} \
     +trainer.wandb_run_id="${wandb_run_id}"

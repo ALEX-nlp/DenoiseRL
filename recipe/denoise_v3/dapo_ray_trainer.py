@@ -2180,6 +2180,11 @@ class RayDAPOTrainer(RayPPOTrainer):
                             "first_correct_box_erd_round_digits", 2
                         )
                     ),
+                    post_fcs_tolerance_tokens=int(
+                        self.config.trainer.get(
+                            "first_correct_box_tolerance_tokens", 32
+                        )
+                    ),
                 )
                 reward_extra_infos_dict.update(first_correct_box_extras)
                 _metrics.update(

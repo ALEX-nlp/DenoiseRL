@@ -73,6 +73,7 @@ class FirstCorrectBoxAnalysisTest(unittest.TestCase):
             text,
             is_correct_box=lambda box: box.content == "5",
             token_count=len,
+            post_fcs_tolerance_tokens=0,
         )
 
         second_box_end = text.index(r"\boxed{5}") + len(r"\boxed{5}")
@@ -91,6 +92,41 @@ class FirstCorrectBoxAnalysisTest(unittest.TestCase):
 
         self.assertFalse(analysis.found)
         self.assertEqual(analysis.reward_factor, 1.0)
+
+    def test_first_32_post_fcs_tokens_are_free(self):
+        boxed = r"work \boxed{5}"
+        within_tolerance = boxed + "x" * 32
+        over_tolerance = boxed + "x" * 64
+
+        within = analyze_first_correct_box(
+            within_tolerance,
+            is_correct_box=lambda box: box.content == "5",
+            token_count=len,
+            post_fcs_tolerance_tokens=32,
+        )
+        over = analyze_first_correct_box(
+            over_tolerance,
+            is_correct_box=lambda box: box.content == "5",
+            token_count=len,
+            post_fcs_tolerance_tokens=32,
+        )
+
+        self.assertEqual(within.external_redundancy, 0.0)
+        self.assertEqual(within.reward_factor, 1.0)
+        self.assertEqual(over.penalized_post_fcs_token_count, 32)
+        self.assertEqual(
+            over.external_redundancy,
+            round(32 / len(over_tolerance), 2),
+        )
+
+    def test_negative_tolerance_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            analyze_first_correct_box(
+                r"\boxed{5}",
+                is_correct_box=lambda box: True,
+                token_count=len,
+                post_fcs_tolerance_tokens=-1,
+            )
 
 
 class FirstCorrectBoxBatchRewardTest(unittest.TestCase):
@@ -121,7 +157,7 @@ class FirstCorrectBoxBatchRewardTest(unittest.TestCase):
 
     def test_repeated_correct_answer_receives_smaller_scalar_reward(self):
         short = r"work \boxed{5}"
-        repeated = r"work \boxed{5} again \boxed{5}"
+        repeated = short + (r" again \boxed{5}" * 4)
         tokenizer, responses, mask, prefixes, correctness = self._batch(
             [short, repeated]
         )

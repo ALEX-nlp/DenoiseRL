@@ -72,6 +72,7 @@ class DenoiseV3ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.first_correct_box_reward_enabled=True", args)
         self.assertIn("+trainer.first_correct_box_max_boxes=10", args)
         self.assertIn("+trainer.first_correct_box_erd_round_digits=2", args)
+        self.assertIn("+trainer.first_correct_box_tolerance_tokens=32", args)
 
     def test_8b_uses_first_correct_box_reward_by_default(self):
         result = self._expand_script(SCRIPT_8B_PATH)
@@ -83,6 +84,7 @@ class DenoiseV3ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.length_reward_scope=all", args)
         self.assertIn("+trainer.first_correct_box_reward_enabled=True", args)
         self.assertIn("+trainer.first_correct_box_max_boxes=10", args)
+        self.assertIn("+trainer.first_correct_box_tolerance_tokens=32", args)
 
     def test_exposes_length_reward_as_environment_overrides(self):
         result = self._expand_script(
@@ -102,6 +104,7 @@ class DenoiseV3ConfigTest(unittest.TestCase):
             first_correct_box_reward_enabled=False,
             first_correct_box_max_boxes=7,
             first_correct_box_erd_round_digits=3,
+            first_correct_box_tolerance_tokens=64,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -109,6 +112,7 @@ class DenoiseV3ConfigTest(unittest.TestCase):
         self.assertIn("+trainer.first_correct_box_reward_enabled=False", args)
         self.assertIn("+trainer.first_correct_box_max_boxes=7", args)
         self.assertIn("+trainer.first_correct_box_erd_round_digits=3", args)
+        self.assertIn("+trainer.first_correct_box_tolerance_tokens=64", args)
 
     def test_random_token_entrypoint_enables_dynamic_maximum(self):
         result = self._expand_script(RANDOM_TOKEN_SCRIPT_PATH)

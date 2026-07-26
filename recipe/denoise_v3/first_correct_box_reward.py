@@ -7,7 +7,7 @@ adapted to mathematical rollouts with explicit ``\\boxed{...}`` answers.
 For an already-correct rollout, the first correct box defines the First
 Correct Solution (FCS).  Text after that box is external redundancy:
 
-    ERD = round(post_fcs_tokens / total_tokens, 2)
+    ERD = round(max(post_fcs_tokens - tolerance_tokens, 0) / total_tokens, 2)
     reward = accuracy_reward * (1 - ERD)
 
 The shaping remains sequence-level and does not modify GRPO advantage
@@ -44,7 +44,9 @@ class FirstCorrectBoxAnalysis:
     fcs_char_end: int | None
     fcs_token_count: int
     post_fcs_token_count: int
+    penalized_post_fcs_token_count: int
     total_token_count: int
+    post_fcs_tolerance_tokens: int
     external_redundancy: float
     reward_factor: float
 
@@ -158,12 +160,18 @@ def analyze_first_correct_box(
     token_count: Callable[[str], int],
     max_boxes: int = 10,
     erd_round_digits: int = 2,
+    post_fcs_tolerance_tokens: int = 32,
 ) -> FirstCorrectBoxAnalysis:
     """Find the first correct box and calculate the paper's ERD multiplier."""
 
     if erd_round_digits < 0:
         raise ValueError(
             f"erd_round_digits must be non-negative, got {erd_round_digits}."
+        )
+    if post_fcs_tolerance_tokens < 0:
+        raise ValueError(
+            "post_fcs_tolerance_tokens must be non-negative, got "
+            f"{post_fcs_tolerance_tokens}."
         )
 
     boxes, has_more = find_complete_boxed_spans(
@@ -177,11 +185,14 @@ def analyze_first_correct_box(
 
         fcs_tokens = max(0, int(token_count(response_text[: box.end])))
         post_fcs_tokens = max(0, int(token_count(response_text[box.end :])))
+        penalized_post_fcs_tokens = max(
+            post_fcs_tokens - post_fcs_tolerance_tokens, 0
+        )
         if total_tokens == 0:
             external_redundancy = 0.0
         else:
             external_redundancy = round(
-                post_fcs_tokens / total_tokens, erd_round_digits
+                penalized_post_fcs_tokens / total_tokens, erd_round_digits
             )
             external_redundancy = min(1.0, max(0.0, external_redundancy))
 
@@ -193,7 +204,9 @@ def analyze_first_correct_box(
             fcs_char_end=box.end,
             fcs_token_count=fcs_tokens,
             post_fcs_token_count=post_fcs_tokens,
+            penalized_post_fcs_token_count=penalized_post_fcs_tokens,
             total_token_count=total_tokens,
+            post_fcs_tolerance_tokens=post_fcs_tolerance_tokens,
             external_redundancy=external_redundancy,
             reward_factor=1.0 - external_redundancy,
         )
@@ -206,7 +219,9 @@ def analyze_first_correct_box(
         fcs_char_end=None,
         fcs_token_count=0,
         post_fcs_token_count=0,
+        penalized_post_fcs_token_count=0,
         total_token_count=total_tokens,
+        post_fcs_tolerance_tokens=post_fcs_tolerance_tokens,
         external_redundancy=0.0,
         reward_factor=1.0,
     )
@@ -262,6 +277,7 @@ def apply_first_correct_box_reward(
     extra_infos: Sequence[Any] | None = None,
     max_boxes: int = 10,
     erd_round_digits: int = 2,
+    post_fcs_tolerance_tokens: int = 32,
 ) -> tuple[torch.Tensor, dict[str, list[Any]], dict[str, float]]:
     """Apply FCA external-redundancy shaping to a rollout batch.
 
@@ -282,6 +298,11 @@ def apply_first_correct_box_reward(
         raise ValueError(
             "responses and reward_tensor must have the same shape, got "
             f"{tuple(responses.shape)} and {tuple(reward_tensor.shape)}."
+        )
+    if post_fcs_tolerance_tokens < 0:
+        raise ValueError(
+            "post_fcs_tolerance_tokens must be non-negative, got "
+            f"{post_fcs_tolerance_tokens}."
         )
 
     batch_size = reward_tensor.shape[0]
@@ -344,6 +365,7 @@ def apply_first_correct_box_reward(
             token_count=lambda text: _token_count(tokenizer, text),
             max_boxes=max_boxes,
             erd_round_digits=erd_round_digits,
+            post_fcs_tolerance_tokens=post_fcs_tolerance_tokens,
         )
         analyses[row_index] = analysis
         if analysis.found:
@@ -360,7 +382,9 @@ def apply_first_correct_box_reward(
         "first_correct_box_index": [],
         "first_correct_box_fcs_token_count": [],
         "first_correct_box_post_fcs_token_count": [],
+        "first_correct_box_penalized_post_fcs_token_count": [],
         "first_correct_box_total_token_count": [],
+        "first_correct_box_post_fcs_tolerance_tokens": [],
         "external_redundancy": [],
         "external_redundancy_factor": [],
         "external_redundancy_penalty": effective_penalties.detach()
@@ -391,8 +415,18 @@ def apply_first_correct_box_reward(
         extras["first_correct_box_post_fcs_token_count"].append(
             analysis.post_fcs_token_count if analysis is not None else 0
         )
+        extras["first_correct_box_penalized_post_fcs_token_count"].append(
+            analysis.penalized_post_fcs_token_count
+            if analysis is not None
+            else 0
+        )
         extras["first_correct_box_total_token_count"].append(
             analysis.total_token_count if analysis is not None else 0
+        )
+        extras["first_correct_box_post_fcs_tolerance_tokens"].append(
+            analysis.post_fcs_tolerance_tokens
+            if analysis is not None
+            else post_fcs_tolerance_tokens
         )
         extras["external_redundancy"].append(
             analysis.external_redundancy if analysis is not None else 0.0
@@ -452,6 +486,16 @@ def apply_first_correct_box_reward(
             if found_analyses
             else 0.0
         ),
+        "penalized_post_fcs_token_count_mean": (
+            float(
+                np.mean(
+                    [a.penalized_post_fcs_token_count for a in found_analyses]
+                )
+            )
+            if found_analyses
+            else 0.0
+        ),
+        "post_fcs_tolerance_tokens": float(post_fcs_tolerance_tokens),
         "reward_before_mean": (
             float(reward_before[eligible_mask].mean().item())
             if np.any(eligible)
