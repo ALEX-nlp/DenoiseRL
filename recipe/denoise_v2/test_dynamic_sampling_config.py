@@ -90,6 +90,23 @@ class DynamicSamplingConfigTest(unittest.TestCase):
             "if v2_curriculum is not None and not use_dapo:", source
         )
 
+    def test_dynamic_sampling_uses_partial_none_width_aligned_concat(self):
+        source = TRAINER.read_text(encoding="utf-8")
+        dapo_step = source[source.index("    def _dapo_step(") :]
+        alignment = source[
+            source.index("    def _pad_partial_none_batch_layout(") :
+            source.index("    def _dapo_filter_kept_problems(")
+        ]
+
+        self.assertIn(
+            "self._concat_dynamic_sample_batches(", dapo_step
+        )
+        self.assertIn("(prompt_pad, 0)", alignment)
+        self.assertIn("(0, response_pad)", alignment)
+        self.assertIn(
+            "batch.batch[\"input_ids\"] = torch.cat(", alignment
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

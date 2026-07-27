@@ -63,6 +63,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 from tqdm import tqdm
 
@@ -2401,6 +2402,182 @@ class RayDAPOTrainer(RayPPOTrainer):
     # -------------------------------------------------------------------------
     # DAPO: filtering by problem_id avg acc
     # -------------------------------------------------------------------------
+    def _pad_partial_none_batch_layout(
+        self,
+        batch: DataProto,
+        *,
+        target_prompt_width: int,
+        target_response_width: int,
+    ) -> DataProto:
+        """Pad one ``partial_mode=none`` batch to a shared prompt/response layout.
+
+        ``_fold_partial_extended`` chooses the response width from the largest
+        prefix in the current generation round. Consequently, two rounds can have
+        different ``prompts`` / ``responses`` widths even though every row is
+        otherwise compatible. DAPO accumulates retained rows across rounds, so the
+        widths must be normalized before ``DataProto.concat``.
+
+        Prompt-aligned tensors are left-padded and response-aligned tensors are
+        right-padded. This preserves the prompt/response boundary and keeps all
+        added response positions masked with zero.
+        """
+        prompts = batch.batch["prompts"]
+        responses = batch.batch["responses"]
+        old_prompt_width = int(prompts.shape[-1])
+        old_response_width = int(responses.shape[-1])
+        old_total_width = old_prompt_width + old_response_width
+
+        if target_prompt_width < old_prompt_width:
+            raise ValueError(
+                "target_prompt_width must not shrink a DAPO batch: "
+                f"target={target_prompt_width}, current={old_prompt_width}."
+            )
+        if target_response_width < old_response_width:
+            raise ValueError(
+                "target_response_width must not shrink a DAPO batch: "
+                f"target={target_response_width}, current={old_response_width}."
+            )
+
+        prompt_pad = target_prompt_width - old_prompt_width
+        response_pad = target_response_width - old_response_width
+        if prompt_pad == 0 and response_pad == 0:
+            return batch
+
+        pad_token_id = int(self.tokenizer.pad_token_id)
+        original_items = {
+            key: value
+            for key, value in batch.batch.items()
+            if torch.is_tensor(value)
+        }
+
+        new_prompts = F.pad(
+            prompts, (prompt_pad, 0), mode="constant", value=pad_token_id
+        ).contiguous()
+        new_responses = F.pad(
+            responses, (0, response_pad), mode="constant", value=pad_token_id
+        ).contiguous()
+
+        attention_mask = batch.batch["attention_mask"]
+        if int(attention_mask.shape[-1]) != old_total_width:
+            raise ValueError(
+                "partial_mode=none concat alignment expected attention_mask width "
+                f"{old_total_width}, got {int(attention_mask.shape[-1])}."
+            )
+        prompt_attention = F.pad(
+            attention_mask[..., :old_prompt_width],
+            (prompt_pad, 0),
+            mode="constant",
+            value=0,
+        )
+        response_attention = F.pad(
+            attention_mask[..., old_prompt_width:],
+            (0, response_pad),
+            mode="constant",
+            value=0,
+        )
+        new_attention_mask = torch.cat(
+            [prompt_attention, response_attention], dim=-1
+        ).contiguous()
+
+        batch.batch["prompts"] = new_prompts
+        batch.batch["responses"] = new_responses
+        batch.batch["input_ids"] = torch.cat(
+            [new_prompts, new_responses], dim=-1
+        ).contiguous()
+        batch.batch["attention_mask"] = new_attention_mask
+        batch.batch["position_ids"] = compute_position_id_with_mask(
+            new_attention_mask
+        ).contiguous()
+
+        structural_keys = {
+            "prompts",
+            "responses",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+        }
+        for key, tensor in original_items.items():
+            if key in structural_keys or tensor.ndim < 2:
+                continue
+            width = int(tensor.shape[-1])
+            if width == old_response_width:
+                batch.batch[key] = F.pad(
+                    tensor, (0, response_pad), mode="constant", value=0
+                ).contiguous()
+            elif width == old_prompt_width:
+                batch.batch[key] = F.pad(
+                    tensor, (prompt_pad, 0), mode="constant", value=0
+                ).contiguous()
+            elif width == old_total_width:
+                prompt_part = F.pad(
+                    tensor[..., :old_prompt_width],
+                    (prompt_pad, 0),
+                    mode="constant",
+                    value=0,
+                )
+                response_part = F.pad(
+                    tensor[..., old_prompt_width:],
+                    (0, response_pad),
+                    mode="constant",
+                    value=0,
+                )
+                batch.batch[key] = torch.cat(
+                    [prompt_part, response_part], dim=-1
+                ).contiguous()
+
+        return batch
+
+    def _concat_dynamic_sample_batches(
+        self, accumulated: DataProto, current: DataProto
+    ) -> DataProto:
+        """Concat DAPO rounds, aligning variable ``partial_mode=none`` widths."""
+        partial_mode = str(
+            self.config.trainer.get("partial_mode", "shift")
+        ).lower()
+        if partial_mode == "none":
+            target_prompt_width = max(
+                int(accumulated.batch["prompts"].shape[-1]),
+                int(current.batch["prompts"].shape[-1]),
+            )
+            target_response_width = max(
+                int(accumulated.batch["responses"].shape[-1]),
+                int(current.batch["responses"].shape[-1]),
+            )
+            accumulated = self._pad_partial_none_batch_layout(
+                accumulated,
+                target_prompt_width=target_prompt_width,
+                target_response_width=target_response_width,
+            )
+            current = self._pad_partial_none_batch_layout(
+                current,
+                target_prompt_width=target_prompt_width,
+                target_response_width=target_response_width,
+            )
+
+        accumulated_keys = set(accumulated.batch.keys())
+        current_keys = set(current.batch.keys())
+        if accumulated_keys != current_keys:
+            raise RuntimeError(
+                "DAPO batches have different tensor keys before concat: "
+                f"only_accumulated={sorted(accumulated_keys - current_keys)}, "
+                f"only_current={sorted(current_keys - accumulated_keys)}."
+            )
+        mismatched_shapes = {
+            key: (
+                tuple(accumulated.batch[key].shape[1:]),
+                tuple(current.batch[key].shape[1:]),
+            )
+            for key in accumulated_keys
+            if tuple(accumulated.batch[key].shape[1:])
+            != tuple(current.batch[key].shape[1:])
+        }
+        if mismatched_shapes:
+            raise RuntimeError(
+                "DAPO batches still have incompatible tensor shapes after "
+                f"alignment: {mismatched_shapes}."
+            )
+        return DataProto.concat([accumulated, current])
+
     def _dapo_filter_kept_problems(self, batch: DataProto):
         """
         DAPO-style dynamic sampling: aggregate verifier ``acc`` by ``problem_id`` and
@@ -2653,9 +2830,17 @@ class RayDAPOTrainer(RayPPOTrainer):
 
             if dapo_state.get("batch") is None:
                 dapo_state["batch"] = filtered_batch
+            elif len(dapo_state["batch"].batch) == 0:
+                dapo_state["batch"] = filtered_batch
             elif len(filtered_batch.batch) > 0:
-                dapo_state["batch"] = DataProto.concat(
-                    [dapo_state["batch"], filtered_batch]
+                dapo_state["batch"] = self._concat_dynamic_sample_batches(
+                    dapo_state["batch"], filtered_batch
+                )
+                metrics["denoise/dapo/concat_prompt_width"] = float(
+                    dapo_state["batch"].batch["prompts"].shape[-1]
+                )
+                metrics["denoise/dapo/concat_response_width"] = float(
+                    dapo_state["batch"].batch["responses"].shape[-1]
                 )
             dapo_state["num_kept_problems"] = (
                 int(dapo_state.get("num_kept_problems", 0)) + int(n_kept)
