@@ -7,6 +7,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 SCRIPT_4B = SCRIPT_DIR / "grpo_denoise_dynamic_sample_line_qwen3-4b_v2.0.sh"
 SCRIPT_8B = SCRIPT_DIR / "grpo_denoise_dynamic_sample_line_qwen3-8b_v2.0.sh"
+TRAINER = SCRIPT_DIR / "dapo_ray_trainer.py"
 
 
 class DynamicSamplingConfigTest(unittest.TestCase):
@@ -73,6 +74,21 @@ class DynamicSamplingConfigTest(unittest.TestCase):
             "actor_rollout_ref.model.path=../Model/Qwen/Qwen3-8B-Base", args
         )
         self.assertIn("trainer.project_name=DenoiseRL-v2-8B", args)
+
+    def test_v2_curriculum_updates_inside_sampling_before_filtering(self):
+        source = TRAINER.read_text(encoding="utf-8")
+        dapo_step = source[source.index("    def _dapo_step(") :]
+
+        curriculum_update = dapo_step.index(
+            "self._init_v2_curriculum().update("
+        )
+        acc_filter = dapo_step.index(
+            "self._dapo_filter_kept_problems(new_batch)"
+        )
+        self.assertLess(curriculum_update, acc_filter)
+        self.assertIn(
+            "if v2_curriculum is not None and not use_dapo:", source
+        )
 
 
 if __name__ == "__main__":
