@@ -384,11 +384,18 @@ class RayDAPOTrainer(RayPPOTrainer):
         ]
         removed_count = original_size - len(kept_indices)
         train_batch_size = int(self.config.data.train_batch_size)
-        if len(kept_indices) < train_batch_size:
+        use_dapo = bool(self.config.trainer.get("use_dapo", False))
+        active_batch_size = (
+            int(self.config.data.get("gen_batch_size", train_batch_size))
+            if use_dapo
+            else train_batch_size
+        )
+        if len(kept_indices) < active_batch_size:
             raise ValueError(
-                "DenoiseRL v2 pool has fewer usable rows than train_batch_size after "
+                "DenoiseRL v2 pool has fewer usable rows than the active sampling "
+                "batch after "
                 "removing samples without wrong_answer_with_boxed: "
-                f"usable={len(kept_indices)}, train_batch_size={train_batch_size}."
+                f"usable={len(kept_indices)}, active_batch_size={active_batch_size}."
             )
 
         self.train_dataset.dataframe = dataframe.select(kept_indices)
@@ -492,20 +499,24 @@ class RayDAPOTrainer(RayPPOTrainer):
                 "DenoiseRL v2 requires trainer.noise_source to be "
                 f"'partial_wrong' or 'random_tokens', got {noise_source!r}."
             )
-        if bool(self.config.trainer.get("use_dapo", False)):
-            raise ValueError("trainer.use_dapo is incompatible with the v2 active batch.")
-
         train_batch_size = int(self.config.data.train_batch_size)
         gen_batch_size = int(self.config.data.get("gen_batch_size", train_batch_size))
-        if gen_batch_size != train_batch_size:
+        use_dapo = bool(self.config.trainer.get("use_dapo", False))
+        if gen_batch_size <= 0:
             raise ValueError(
-                "DenoiseRL v2 requires data.gen_batch_size == data.train_batch_size."
+                f"data.gen_batch_size must be positive, got {gen_batch_size}."
             )
+        if not use_dapo and gen_batch_size != train_batch_size:
+            raise ValueError(
+                "DenoiseRL v2 requires data.gen_batch_size == "
+                "data.train_batch_size unless trainer.use_dapo=True."
+            )
+        active_batch_size = gen_batch_size if use_dapo else train_batch_size
 
         trainer_cfg = self.config.trainer
         controller = PerSampleNoiseCurriculum(
             problem_ids=list(self.train_dataset.dataframe["problem_id"]),
-            batch_size=train_batch_size,
+            batch_size=active_batch_size,
             initial_rho=trainer_cfg.get("v2_initial_rho", 0.0),
             min_rho=trainer_cfg.get("v2_min_rho", 0.0),
             max_rho=trainer_cfg.get("v2_max_rho", 0.5),
@@ -602,6 +613,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                 f"pool_size={v2_curriculum.pool_size}, "
                 f"active_batch_size={v2_curriculum.batch_size}, "
                 "noise_rollouts_per_problem=16, "
+                f"dynamic_sampling={bool(self.config.trainer.get('use_dapo', False))}, "
+                f"backward_prompt_batch_size={int(self.config.data.train_batch_size)}, "
+                "max_dynamic_sample_rounds="
+                f"{int(self.config.trainer.get('dapo_max_num_gen_batches', 0))}, "
                 f"initial_rho={v2_curriculum.initial_rho}, "
                 f"rho_range=[{v2_curriculum.min_rho}, {v2_curriculum.max_rho}], "
                 f"target_accuracy={v2_curriculum.target_accuracy}, "
@@ -666,7 +681,9 @@ class RayDAPOTrainer(RayPPOTrainer):
         # is rolled out and filtered (drop problems whose avg acc == 0 or 1). Kept
         # problems are concatenated across gen_batches until we have
         # ``data.train_batch_size`` problems, then a single PPO update runs on the
-        # first ``train_batch_size`` problems.
+        # first ``train_batch_size`` problems. For v2, the curriculum owns the
+        # ``gen_batch_size`` active prompts and receives accuracy feedback from every
+        # sampled prompt, including groups discarded before backward.
         use_dapo = bool(self.config.trainer.get("use_dapo", False))
         dapo_state: dict = {
             "batch": None,
@@ -674,6 +691,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             "num_gen_batches": 0,
             "metrics": {},
             "reward_extra_infos_dict": {},
+            "problem_id_to_accs": {},
         }
 
         for epoch in range(self.config.trainer.total_epochs):
@@ -701,7 +719,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                         self.gen_steps += 1
                         self.inner_global_steps += 1
                         continue
-                    batch, metrics = result
+                    batch, metrics, sampled_problem_id_to_avg_acc = result
                 else:
                     batch, metrics = self.train_batch(
                         batch_dict,
@@ -709,6 +727,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                         curr_step_profile,
                         timing_raw,
                     )
+                    sampled_problem_id_to_avg_acc = None
                 problem_id_to_avg_acc, problem_id_metrics = compute_problem_id_to_avg_acc(batch)
                 if self.global_steps % self.config.trainer.save_freq == 1:
                     local_global_step_save_json = os.path.join(
@@ -726,9 +745,16 @@ class RayDAPOTrainer(RayPPOTrainer):
                 )
                 metrics.update(problem_id_metrics)
                 if v2_curriculum is not None:
-                    # compute_problem_id_to_avg_acc aggregates all 16 rollout
-                    # correctness values independently for every active problem.
-                    metrics.update(v2_curriculum.update(problem_id_to_avg_acc))
+                    # Dynamic sampling filters all-correct/all-wrong groups only for
+                    # backward. The v2 rho controller still needs feedback for every
+                    # sampled active prompt, so use the pre-filter aggregate returned
+                    # by _dapo_step in that mode.
+                    curriculum_feedback = (
+                        sampled_problem_id_to_avg_acc
+                        if sampled_problem_id_to_avg_acc is not None
+                        else problem_id_to_avg_acc
+                    )
+                    metrics.update(v2_curriculum.update(curriculum_feedback))
                 if (
                     self.val_reward_fn is not None
                     and self.config.trainer.test_freq > 0
@@ -2576,15 +2602,17 @@ class RayDAPOTrainer(RayPPOTrainer):
              ``problem_id`` and dropping problems whose average acc is exactly
              ``0`` or ``1``.
           3. Concatenate the kept rows into ``dapo_state["batch"]`` and update the
-             ``num_kept_problems`` / ``num_gen_batches`` counters.
+             ``num_kept_problems`` / ``num_gen_batches`` counters. Separately retain
+             pre-filter accuracy feedback for every sampled prompt so the v2
+             per-sample curriculum can still update all active prompts.
 
         If the accumulated kept-problem count is still ``< train_batch_size``, return
         ``None`` to signal the caller to consume another gen_batch.
 
         Once ``>= train_batch_size``, slice the first ``train_batch_size * (N + K)``
         rows (whole-problem chunks), apply uid relabeling, run advantage + PPO
-        backward, and return ``(batch, metrics)``. The DAPO state is reset before
-        returning.
+        backward, and return ``(batch, metrics, sampled_problem_id_to_avg_acc)``.
+        The DAPO state is reset before returning.
 
         Profiling is started on the FIRST gen_batch of each global step (when the
         accumulator is empty) so that a single ``_start_profiling`` / ``_stop_profiling``
@@ -2610,6 +2638,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                 )
             dapo_state["reward_extra_infos_dict"] = reward_extra_infos_dict
             dapo_state["num_gen_batches"] = int(dapo_state.get("num_gen_batches", 0)) + 1
+
+            sampled_problem_id_to_avg_acc, _ = compute_problem_id_to_avg_acc(new_batch)
+            problem_id_to_accs = dapo_state.setdefault("problem_id_to_accs", {})
+            for problem_id, average_accuracy in sampled_problem_id_to_avg_acc.items():
+                problem_id_to_accs.setdefault(problem_id, []).append(
+                    float(average_accuracy)
+                )
 
             filtered_batch, n_kept, filter_metrics = self._dapo_filter_kept_problems(new_batch)
             # DAPO counters are summed across gen_batches within a single global step
@@ -2677,6 +2712,12 @@ class RayDAPOTrainer(RayPPOTrainer):
             metrics["denoise/dapo/n_rows_used_in_update"] = float(traj_bsz)
             metrics["denoise/dapo/n_problems_used_in_update"] = float(prompt_bsz)
             reward_extra_infos_dict = dapo_state.get("reward_extra_infos_dict", {})
+            sampled_problem_id_to_avg_acc = {
+                problem_id: float(np.mean(accuracies))
+                for problem_id, accuracies in dapo_state.get(
+                    "problem_id_to_accs", {}
+                ).items()
+            }
 
             # Reset accumulation BEFORE the heavy backward step so even an exception
             # there leaves the state clean for the next call.
@@ -2685,6 +2726,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             dapo_state["num_gen_batches"] = 0
             dapo_state["metrics"] = {}
             dapo_state["reward_extra_infos_dict"] = {}
+            dapo_state["problem_id_to_accs"] = {}
 
             batch = self._relabel_uids_and_split_groups(batch, metrics)
 
@@ -2693,4 +2735,4 @@ class RayDAPOTrainer(RayPPOTrainer):
                     batch, metrics, timing_raw, reward_extra_infos_dict
                 )
 
-        return batch, metrics
+        return batch, metrics, sampled_problem_id_to_avg_acc
