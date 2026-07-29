@@ -109,7 +109,7 @@ else
     noise_run_tag=""
 fi
 run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}${noise_run_tag}"
-experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
+experiment_name=${experiment_name:-"cutnone-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
 
@@ -199,7 +199,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.noise_source=${noise_source} \
     +trainer.max_random_token=${max_random_token} \
     +trainer.random_noise_exclude_special=${random_noise_exclude_special} \
-    +trainer.partial_wrong_cut_strategy=token \
+    +trainer.partial_wrong_cut_strategy=line \
     +trainer.part_response_ratio_strategy=fixed \
     +trainer.partial_mode=none \
     +trainer.use_problem_id_as_uid=True \

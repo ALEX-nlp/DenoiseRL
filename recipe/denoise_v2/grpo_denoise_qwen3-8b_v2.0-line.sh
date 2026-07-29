@@ -11,9 +11,6 @@ effective_rollout_n=16
 
 # Every prompt owns an independent rho. The first active batch starts at zero;
 # replacements inherit the post-update mean rho N of the previous active batch.
-noise_source=${noise_source:-partial_wrong}  # "partial_wrong" | "random_tokens"
-max_random_token=${max_random_token:-2048}
-random_noise_exclude_special=${random_noise_exclude_special:-True}
 v2_initial_rho=${v2_initial_rho:-0.0}
 v2_min_rho=${v2_min_rho:-0.0}
 v2_max_rho=${v2_max_rho:-0.5}
@@ -28,17 +25,8 @@ v2_slope_threshold=${v2_slope_threshold:-0.02}
 # Prefix length p defines a dynamic cache: no penalty through R-p generated
 # tokens, then a linear penalty over the final p. Scope selects correct vs. all.
 correct_length_reward_enabled=${correct_length_reward_enabled:-False}
-correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.9}
+correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
 length_reward_scope=${length_reward_scope:-all}  # "correct" | "all"
-response_clip_reward_penalty=${response_clip_reward_penalty:-0.0}
-case "${response_clip_reward_penalty}" in
-    0|0.0|0.00|0.000|0e0|0E0)
-        response_clip_reward_tag=""
-        ;;
-    *)
-        response_clip_reward_tag="_clipreward${response_clip_reward_penalty}"
-        ;;
-esac
 case "${length_reward_scope}" in
     correct|all)
         ;;
@@ -61,7 +49,7 @@ case "${correct_length_reward_enabled}" in
 esac
 
 # Model / cluster.
-model_name=${model_name:-Qwen3-4B-Base}
+model_name=${model_name:-Qwen3-8B-Base}
 offload=${offload:-True}
 ref_offload=${ref_offload:-True}
 num_gpus=${num_gpus:-4}
@@ -70,7 +58,7 @@ sp_size=${sp_size:-1}
 
 # GRPO schedule.
 epoch=${epoch:-10000}
-project_name=${project_name:-DenoiseRL-v2-4B}
+project_name=${project_name:-DenoiseRL-v2-8B}
 lr=${lr:-1e-6}
 lr_warmup_steps=${lr_warmup_steps:-0}
 test_and_save_freq=${test_and_save_freq:-40}
@@ -95,21 +83,16 @@ use_dynamic_bsz=${use_dynamic_bsz:-True}
 actor_ppo_max_token_len=$((2 * (max_prompt_length + max_response_length)))
 infer_ppo_max_token_len=$((2 * (max_prompt_length + max_response_length)))
 
-# Data stays in file order. partial_wrong removes rows without a usable
-# wrong_answer_with_boxed; random_tokens keeps the full pool. Both modes select
-# active indices beginning with [0, train_prompt_bsz).
+# Data stays in file order. Python first removes rows without a usable
+# wrong_answer_with_boxed, treats the remaining rows as one pool, and explicitly
+# selects active indices beginning with [0, train_prompt_bsz).
 RAY_DATA_HOME=${RAY_DATA_HOME:-.}
 MODEL_PATH=${MODEL_PATH:-../Model/Qwen/${model_name}}
 TRAIN_FILE=${TRAIN_FILE:-./data/MATH7500.with_wrong_boxed.qwen2.5-1.5b.parquet}
 TEST_FILE=${TEST_FILE:-'["./data/aime25_test.parquet","./data/bbeh_data.parquet","./data/MATH500-test.parquet","./data/amc23_test.parquet","./data/aime24_test.parquet","./data/MMLU-Pro-Valid.parquet"]'}
 
-if [[ "${noise_source}" == "random_tokens" ]]; then
-    noise_run_tag="_random-max${max_random_token}"
-else
-    noise_run_tag=""
-fi
-run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}${noise_run_tag}"
-experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
+run_tag="rho${v2_initial_rho}-${v2_max_rho}_target${v2_target_accuracy}_alpha${v2_alpha}_window${v2_history_window}_slope${v2_slope_threshold}_${length_reward_tag}"
+experiment_name=${experiment_name:-"linegrpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
 
@@ -196,10 +179,8 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.max_actor_ckpt_to_keep=1 \
     +trainer.use_dapo=False \
     +trainer.sub_rollout_k=${sub_rollout_k} \
-    +trainer.noise_source=${noise_source} \
-    +trainer.max_random_token=${max_random_token} \
-    +trainer.random_noise_exclude_special=${random_noise_exclude_special} \
-    +trainer.partial_wrong_cut_strategy=token \
+    +trainer.noise_source=partial_wrong \
+    +trainer.partial_wrong_cut_strategy=line \
     +trainer.part_response_ratio_strategy=fixed \
     +trainer.partial_mode=none \
     +trainer.use_problem_id_as_uid=True \
@@ -219,5 +200,4 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.correct_length_reward_enabled=${correct_length_reward_enabled} \
     +trainer.correct_length_reward_min_factor=${correct_length_reward_min_factor} \
     +trainer.length_reward_scope=${length_reward_scope} \
-    +trainer.response_clip_reward_penalty=${response_clip_reward_penalty} \
     +trainer.wandb_run_id="${wandb_run_id}"

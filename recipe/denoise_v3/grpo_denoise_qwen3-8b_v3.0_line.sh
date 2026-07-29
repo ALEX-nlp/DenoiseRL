@@ -3,8 +3,8 @@ set -euxo pipefail
 
 export WANDB_MODE=${WANDB_MODE:-offline}
 
-# DenoiseRL v2 invariants: one active prompt batch, zero clean/main slots, and
-# exactly 16 fixed-rho noise rollouts per prompt.
+# DenoiseRL v3 keeps the v2 curriculum invariants: one active prompt batch,
+# zero clean/main slots, and exactly 16 fixed-rho noise rollouts per prompt.
 n_resp_per_prompt=0
 sub_rollout_k=16
 effective_rollout_n=16
@@ -25,12 +25,16 @@ v2_min_history=${v2_min_history:-2}
 # abs(recent_rho_slope) <= v2_slope_threshold.
 v2_slope_threshold=${v2_slope_threshold:-0.02}
 
-# Prefix length p defines a dynamic cache: no penalty through R-p generated
-# tokens, then a linear penalty over the final p. Scope selects correct vs. all.
+# Keep the older dynamic length shaping optional, but off by default so v3's
+# first-correct-box reward is evaluated without a second length objective.
 correct_length_reward_enabled=${correct_length_reward_enabled:-False}
-correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.9}
+correct_length_reward_min_factor=${correct_length_reward_min_factor:-0.0}
 length_reward_scope=${length_reward_scope:-all}  # "correct" | "all"
 response_clip_reward_penalty=${response_clip_reward_penalty:-0.0}
+first_correct_box_reward_enabled=${first_correct_box_reward_enabled:-True}
+first_correct_box_max_boxes=${first_correct_box_max_boxes:-10}
+first_correct_box_erd_round_digits=${first_correct_box_erd_round_digits:-2}
+first_correct_box_tolerance_tokens=${first_correct_box_tolerance_tokens:-32}
 case "${response_clip_reward_penalty}" in
     0|0.0|0.00|0.000|0e0|0E0)
         response_clip_reward_tag=""
@@ -59,9 +63,21 @@ case "${correct_length_reward_enabled}" in
         exit 1
         ;;
 esac
+case "${first_correct_box_reward_enabled}" in
+    True|true|1)
+        first_correct_box_reward_tag="fcb${first_correct_box_max_boxes}-tol${first_correct_box_tolerance_tokens}"
+        ;;
+    False|false|0)
+        first_correct_box_reward_tag="nofcb"
+        ;;
+    *)
+        echo "first_correct_box_reward_enabled must be True or False, got: ${first_correct_box_reward_enabled}" >&2
+        exit 1
+        ;;
+esac
 
 # Model / cluster.
-model_name=${model_name:-Qwen3-4B-Base}
+model_name=${model_name:-Qwen3-8B-Base}
 offload=${offload:-True}
 ref_offload=${ref_offload:-True}
 num_gpus=${num_gpus:-4}
@@ -70,7 +86,7 @@ sp_size=${sp_size:-1}
 
 # GRPO schedule.
 epoch=${epoch:-10000}
-project_name=${project_name:-DenoiseRL-v2-4B}
+project_name=${project_name:-DenoiseRL-v3-8B}
 lr=${lr:-1e-6}
 lr_warmup_steps=${lr_warmup_steps:-0}
 test_and_save_freq=${test_and_save_freq:-40}
@@ -108,8 +124,8 @@ if [[ "${noise_source}" == "random_tokens" ]]; then
 else
     noise_run_tag=""
 fi
-run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${length_reward_tag}${response_clip_reward_tag}${noise_run_tag}"
-experiment_name=${experiment_name:-"none-grpo-denoise-v2-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
+run_tag="rho${v2_initial_rho}-${v2_max_rho}_t${v2_target_accuracy}_a${v2_alpha}_w${v2_history_window}_s${v2_slope_threshold}_${first_correct_box_reward_tag}_${length_reward_tag}${response_clip_reward_tag}${noise_run_tag}"
+experiment_name=${experiment_name:-"linenone-grpo-denoise-v3-${model_name}-bsz${train_prompt_bsz}-k16-${run_tag}"}
 wandb_run_id=${wandb_run_id:-${experiment_name}}
 CKPTS_DIR=${CKPTS_DIR:-${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}}
 
@@ -119,7 +135,7 @@ top_k=${top_k:--1}
 val_temperature=${val_temperature:-0.6}
 val_top_p=${val_top_p:-0.95}
 
-PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
+PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v3.main_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -200,7 +216,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.max_random_token=${max_random_token} \
     +trainer.random_noise_exclude_special=${random_noise_exclude_special} \
     +trainer.partial_wrong_cut_strategy=token \
-    +trainer.part_response_ratio_strategy=fixed \
+    +trainer.part_response_ratio_strategy=line \
     +trainer.partial_mode=none \
     +trainer.use_problem_id_as_uid=True \
     +trainer.use_same_uid=False \
@@ -220,4 +236,8 @@ PYTHONUNBUFFERED=1 python3 -m recipe.denoise_v2.main_dapo \
     +trainer.correct_length_reward_min_factor=${correct_length_reward_min_factor} \
     +trainer.length_reward_scope=${length_reward_scope} \
     +trainer.response_clip_reward_penalty=${response_clip_reward_penalty} \
+    +trainer.first_correct_box_reward_enabled=${first_correct_box_reward_enabled} \
+    +trainer.first_correct_box_max_boxes=${first_correct_box_max_boxes} \
+    +trainer.first_correct_box_erd_round_digits=${first_correct_box_erd_round_digits} \
+    +trainer.first_correct_box_tolerance_tokens=${first_correct_box_tolerance_tokens} \
     +trainer.wandb_run_id="${wandb_run_id}"
