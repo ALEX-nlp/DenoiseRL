@@ -6,17 +6,15 @@
   </a>
 </p>
 
-![DenoiseRL v2 overview](./assets/denoiserl-v2-overview.png)
+![DenoiseRL overview](./assets/denoiserl-overview.png)
 
 *DenoiseRL turns weak-model failures into structured reasoning noise. The policy learns to recover from a truncated wrong trajectory, while a sample-level curriculum adapts the prefix length to the policy's evolving capability.*
 
-This repository contains the official mathematical-reasoning implementation of **DenoiseRL v2**. Instead of treating a weak model as an imperfect teacher, DenoiseRL uses its failed trajectories as recoverable perturbations. The policy is trained only on its continuation from the noisy prefix and receives a rule-based reward for reaching the verified answer.
+This repository contains the official mathematical-reasoning implementation of **DenoiseRL**. Instead of treating a weak model as an imperfect teacher, DenoiseRL uses its failed trajectories as recoverable perturbations. The policy is trained only on its continuation from the noisy prefix and receives a rule-based reward for reaching the verified answer.
 
 The interactive-agent implementation is maintained separately in **[ALEX-nlp/DenoiseRL-agent](https://github.com/ALEX-nlp/DenoiseRL-agent)**. It applies the same recovery objective to noisy action prefixes in ALFWorld.
 
-## What changed in v2
-
-DenoiseRL v2 replaces the fixed-noise v1 recipe with a fine-grained adaptive curriculum:
+## Core design
 
 - **Recovery-only rollout groups.** Each active problem uses `K = 16` noisy-prefix continuations and no additional clean rollout slots.
 - **Per-problem noise control.** Every problem owns an independent prefix ratio `rho`, updated from its online recovery accuracy.
@@ -24,7 +22,7 @@ DenoiseRL v2 replaces the fixed-noise v1 recipe with a fine-grained adaptive cur
 - **Continuation-only optimization.** Weak-model prefix tokens are verifier-visible but masked from the RL loss.
 - **Curriculum refresh.** Problems whose recent `rho` trend has stabilized are retired and replaced; new problems inherit the active batch's post-update mean ratio.
 
-The v1 fixed-ratio implementation remains in [`recipe/denoise`](./recipe/denoise), while the primary implementation used by the current paper is [`recipe/denoise_v2`](./recipe/denoise_v2). See [`recipe/README.md`](./recipe/README.md) for the version map and control recipes.
+The main training implementation is [`recipe/denoise_v2`](./recipe/denoise_v2). Recipe entry points and controls are summarized in [`recipe/README.md`](./recipe/README.md).
 
 ## Method
 
@@ -96,9 +94,8 @@ DenoiseRL/
 ├── assets/                         # tracked README assets
 ├── data/                           # local datasets (ignored)
 ├── recipe/
-│   ├── README.md                   # recipe/version guide
-│   ├── denoise/                    # v1: legacy fixed-noise implementation
-│   ├── denoise_v2/                 # v2: primary adaptive curriculum
+│   ├── README.md                   # recipe guide
+│   ├── denoise_v2/                 # main adaptive-curriculum implementation
 │   └── correct_prefix/             # positive-prefix control
 ├── verl/                           # customized veRL runtime
 └── requirements.txt
@@ -132,7 +129,7 @@ python recipe/denoise_v2/data_prepare.py \
 
 Set `TRAIN_FILE` in the launch command to the generated `*.with_wrong_boxed.parquet`.
 
-## Train DenoiseRL v2
+## Train DenoiseRL
 
 The standard GRPO launchers reproduce the recovery-only, per-problem adaptive curriculum:
 
@@ -173,4 +170,4 @@ Model paths, dataset paths, GPU count, tensor parallelism, response length, and 
 - `grpo_denoise_qwen3-4b_v2.0-line-self.sh` uses prefixes from the frozen pre-RL policy.
 - `grpo_denoise_random_tokens_qwen3-{4b,8b}_v2.0.sh` replaces structured weak-model errors with random-token noise.
 
-For the current method, start with the v2 line-aligned launchers rather than the legacy v1 scripts.
+Use the line-aligned launchers above for standard DenoiseRL experiments.
