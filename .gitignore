@@ -95,4 +95,9 @@ readme.pdf
 
 data/*
 rebuttal/*
-latex/*
+/img/
+/latex/
+/output/
+/tmp/
+/tests/
+/paper/

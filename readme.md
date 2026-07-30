@@ -1,201 +1,176 @@
 # DenoiseRL: Bootstrapping Reasoning Models to Recover from Noisy Prefixes
 
-**Caijun Xu, Changyi Xiao, Zhongyuan Peng, Yixin Cao**
+<p align="center">
+  <a href="https://github.com/ALEX-nlp/DenoiseRL-agent">
+    <img src="https://img.shields.io/badge/Agent%20implementation-DenoiseRL--agent-2f6f4e" alt="DenoiseRL-agent">
+  </a>
+</p>
 
-Fudan University · Shanghai Innovation Institute
+![DenoiseRL v2 overview](./assets/denoiserl-v2-overview.png)
 
-<!-- [![Paper](https://img.shields.io/badge/paper-PDF-b31b1b)](paper/_Arxiv__TEAI_DenoiseRL__Bootstrapping_Reasoning_Models_to_Recover_from_Noisy_Prefixes__Copy_.pdf)
-[![Code](https://img.shields.io/badge/code-official-blue)](#)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](#) -->
+*DenoiseRL turns weak-model failures into structured reasoning noise. The policy learns to recover from a truncated wrong trajectory, while a sample-level curriculum adapts the prefix length to the policy's evolving capability.*
 
-![DenoiseRL overview](./img/DenoiseRL.svg)
+This repository contains the official mathematical-reasoning implementation of **DenoiseRL v2**. Instead of treating a weak model as an imperfect teacher, DenoiseRL uses its failed trajectories as recoverable perturbations. The policy is trained only on its continuation from the noisy prefix and receives a rule-based reward for reaching the verified answer.
 
-*Figure 1. DenoiseRL conditions the policy on a truncated incorrect prefix produced by a weak model and trains it, via verifiable-reward RL, to denoise the corrupted reasoning state and recover the correct solution path.*
+The interactive-agent implementation is maintained separately in **[ALEX-nlp/DenoiseRL-agent](https://github.com/ALEX-nlp/DenoiseRL-agent)**. It applies the same recovery objective to noisy action prefixes in ALFWorld.
 
----
+## What changed in v2
 
-This repository contains the **official implementation** of *DenoiseRL: Bootstrapping Reasoning Models to Recover from Noisy Prefixes*. DenoiseRL is a recovery-oriented reinforcement learning framework that **replaces stronger-teacher supervision with structured perturbations derived from weak-model failures**. Rather than imitating a stronger model or curating harder data, the policy is conditioned on incorrect reasoning prefixes and explicitly optimized to revise mistakes and reach a verified answer.
+DenoiseRL v2 replaces the fixed-noise v1 recipe with a fine-grained adaptive curriculum:
 
-## Table of Contents
+- **Recovery-only rollout groups.** Each active problem uses `K = 16` noisy-prefix continuations and no additional clean rollout slots.
+- **Per-problem noise control.** Every problem owns an independent prefix ratio `rho`, updated from its online recovery accuracy.
+- **Line-aligned prefixes.** Requested prefix lengths are rounded to the nearest complete reasoning line when possible, preserving coherent intermediate states.
+- **Continuation-only optimization.** Weak-model prefix tokens are verifier-visible but masked from the RL loss.
+- **Curriculum refresh.** Problems whose recent `rho` trend has stabilized are retired and replaced; new problems inherit the active batch's post-update mean ratio.
 
-- [DenoiseRL: Bootstrapping Reasoning Models to Recover from Noisy Prefixes](#denoiserl-bootstrapping-reasoning-models-to-recover-from-noisy-prefixes)
-  - [Table of Contents](#table-of-contents)
-  - [1. Motivation](#1-motivation)
-  - [2. Method](#2-method)
-  - [3. Key Results](#3-key-results)
-  - [4. Repository Layout](#4-repository-layout)
-  - [5. Installation](#5-installation)
-  - [6. Data Preparation](#6-data-preparation)
-  - [7. Training](#7-training)
-  - [8. Reproduction Guidance](#8-reproduction-guidance)
+The v1 fixed-ratio implementation remains in [`recipe/denoise`](./recipe/denoise), while the primary implementation used by the current paper is [`recipe/denoise_v2`](./recipe/denoise_v2). See [`recipe/README.md`](./recipe/README.md) for the version map and control recipes.
 
----
+## Method
 
-## 1. Motivation
+For each training problem `q`, a frozen weak model produces an incorrect trajectory `w`. DenoiseRL truncates `w` into a noisy prefix `z` and samples a continuation from the policy:
 
-State-of-the-art reasoning RL pipelines (e.g., GRPO and DAPO) are typically constrained along two axes:
-
-1. **Supervisory ceiling.** Performance gains often hinge on access to a *stronger* teacher model, capping further progress when such teachers are unavailable.
-2. **Data engineering cost.** Capability scaling commonly relies on heavy hard-data curation, adversarial synthesis, or trajectory filtering.
-
-DenoiseRL departs from both directions. We **invert the role of weak models**: instead of treating them as imperfect supervisors, we exploit them as low-cost generators of structured corruptions. The policy is conditioned on truncated incorrect prefixes and trained — under standard verifiable rewards — to **denoise** the corrupted state and arrive at a verified solution. This casts reasoning RL as a denoising problem, drawing a conceptual parallel to denoising autoencoders and BART-style pretraining.
-
-## 2. Method
-
-Each training step samples, per problem, a mixture of two rollout types and updates the policy with a single GRPO-style group baseline shared across the mixture:
-
-- **Main rollouts** *(N per problem):* standard on-policy generations conditioned on the prompt.
-- **Denoise rollouts** *(K per problem):* generations conditioned on a truncated weak-model wrong prefix. Given a wrong solution `w`, we retain its first `p = max(1, ⌊rho · |w|⌋)` tokens as an assistant-side prefix; the policy continues from this corrupted state.
-
-Three design choices stabilize and amplify the recovery signal:
-
-- **Length-fair folding.** The visible response is `ỹ = [w₁:p, y_{p+1:p+L}]` with `p + L ≤ R`, preserving a comparable response budget against main rollouts.
-- **Continuation-only optimization.** PPO/GRPO gradients flow primarily through the model-generated continuation; the heavily off-policy prefix is verifier-visible but excluded from the loss, avoiding the high-variance importance ratios documented in prior PPO-style off-policy literature.
-- **Shared group baseline.** Main and denoise trajectories of the same problem share a single advantage baseline, so denoise rollouts naturally provide negative or contrastive signal for problems that are otherwise saturated.
-
-The joint objective can be written as a mixture
-`J(θ) = N/(N+K) · J_main(θ) + K/(N+K) · J_denoise(θ)`,
-which is interpretable as optimizing the policy under a mixture of *solving-from-scratch* and *recovering-from-corruption* distributions.
-
-## 3. Key Results
-
-Reported in the paper across Qwen3-4B and Qwen3-8B policy backbones (training corpus: MATH-7.5K; weak model: Qwen2.5-1.5B-Instruct). For AMC23, AIME24, and AIME25 we report AVG@16; for MATH500 and BBEH we report AVG@1.
-
-**Qwen3-4B-Base**
-
-
-| Method             | MATH500  | AMC23    | AIME24   | AIME25   | BBEH     | Avg.     |
-| ------------------ | -------- | -------- | -------- | -------- | -------- | -------- |
-| Base               | 70.0     | 43.1     | 8.3      | 7.7      | 4.1      | 26.6     |
-| GRPO               | 83.6     | 63.1     | 22.1     | 18.1     | 11.1     | 39.6     |
-| DAPO               | 83.8     | 62.5     | 20.6     | 21.5     | 10.4     | 39.8     |
-| **DenoiseRL-GRPO** | **85.8** | 61.4     | **24.8** | **23.3** | 14.8     | **42.0** |
-| DenoiseRL-DAPO     | 84.6     | **63.6** | 21.9     | 21.7     | **15.7** | 41.5     |
-
-
-**Qwen3-8B-Base**
-
-
-| Method             | MATH500  | AMC23    | AIME24   | AIME25   | BBEH     | Avg.     |
-| ------------------ | -------- | -------- | -------- | -------- | -------- | -------- |
-| Base               | 70.4     | 49.2     | 11.9     | 10.8     | 4.1      | 29.3     |
-| GRPO               | 87.8     | 69.7     | 24.0     | 22.9     | 10.6     | 43.0     |
-| DAPO               | 87.0     | 69.7     | 23.8     | 21.7     | 11.7     | 42.8     |
-| DenoiseRL-GRPO     | 87.2     | 70.3     | 24.6     | 23.1     | 11.5     | 43.3     |
-| **DenoiseRL-DAPO** | **88.2** | **71.4** | **27.0** | **24.8** | **12.6** | **44.8** |
-
-
-Additional takeaways from the ablation studies:
-
-- **Recovery intensity matters.** Sweeping `K ∈ {1, 4, 8}` at `rho = 0.2` shows `K = 4` provides the best trade-off; over-emphasized recovery (`K = 8`) hurts the primary solving objective.
-- **Off-policy prefix updates are unstable.** Directly backpropagating through prefix tokens leads to validation collapse and runaway response length — consistent with prior observations on PPO sensitivity to heavily off-policy tokens.
-- **Length-fair folding helps.** Removing the `p + L ≤ R` cap weakens the 4B average by ~1.8 points (42.0 → 40.2).
-- **Throughput overhead is modest.** Per-step training time on Qwen3-4B-Base is 49.7s for DenoiseRL vs. 43.8s for GRPO under matched rollout budgets.
-
-We refer readers to the paper for full ablations, the case-study analyses of recovery behavior, and the length / overthinking dynamics under varying `rho`.
-
-## 4. Repository Layout
-
+```text
+y ~ pi_theta(. | q, z),     reward = V([z, y]; q)
 ```
+
+The prefix tokens in `z` receive a zero loss mask; gradients flow only through the policy-generated continuation `y`.
+
+At step `s`, problem `i` has a prefix ratio `rho_i` and recovery accuracy `a_i` measured over its `K` rollouts. The controller updates:
+
+```text
+rho_i <- clip(rho_i + alpha * (a_i - a_target), rho_min, rho_max)
+```
+
+Easy problems therefore receive longer wrong prefixes, while difficult problems receive shorter ones. With line-aligned truncation and stable-sample replacement, the curriculum keeps recovery difficulty close to the model's evolving capability boundary.
+
+## Results
+
+Mathematical results use Qwen2.5-1.5B-Instruct to collect weak-model failures and train Qwen3 base models on MATH-7.5K. AMC23, AIME24, and AIME25 use AVG@16; MATH500 and BBEH use AVG@1.
+
+### Qwen3-4B-Base
+
+| Method | MATH500 | AMC23 | AIME24 | AIME25 | BBEH | Avg. |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 70.0 | 43.1 | 8.3 | 7.7 | 4.1 | 26.6 |
+| GRPO | 83.6 | 63.1 | 22.1 | 18.1 | 11.1 | 39.6 |
+| DAPO | 83.8 | 62.5 | 20.6 | 21.5 | 10.4 | 39.8 |
+| Critique-GRPO (with ground truth) | **86.2** | 61.6 | 22.5 | 21.3 | 11.1 | 40.5 |
+| GRPO + correct prefix | 80.2 | 58.9 | 18.5 | 12.3 | 13.3 | 36.6 |
+| **DenoiseRL-GRPO** | 85.6 | **68.4** | **24.8** | 21.7 | 10.7 | 42.2 |
+| **DenoiseRL-DAPO** | 83.6 | 67.2 | 23.3 | **22.9** | **14.3** | **42.3** |
+
+### Qwen3-8B-Base
+
+| Method | MATH500 | AMC23 | AIME24 | AIME25 | BBEH | Avg. |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 70.4 | 49.2 | 11.9 | 10.8 | 4.1 | 29.3 |
+| GRPO | 87.8 | 69.7 | 24.0 | 22.9 | 10.6 | 43.0 |
+| DAPO | 87.0 | 69.7 | 23.8 | 21.7 | 11.7 | 42.8 |
+| Critique-GRPO (with ground truth) | 86.6 | 68.8 | 26.0 | 22.1 | 13.5 | 43.4 |
+| GRPO + correct prefix | 85.6 | 63.6 | 19.8 | 16.3 | 12.8 | 39.6 |
+| **DenoiseRL-GRPO** | **88.0** | 71.4 | 26.3 | **23.8** | **15.4** | 44.9 |
+| **DenoiseRL-DAPO** | 87.8 | **73.1** | **28.8** | 23.3 | 13.0 | **45.2** |
+
+Additional findings:
+
+- Fine-grained per-problem control gives a **15.6-point** average gain over Qwen3-4B-Base, compared with 13.9 for coarse-grained control and 13.5 for a fixed `rho = 0.2`.
+- External weak-model prefixes provide the strongest late-stage noise intensity and the best overall accuracy compared with pre-RL self prefixes and random-token noise.
+- The correct-prefix control underperforms ordinary GRPO at both model scales, showing that recovery from structured errors is not equivalent to conditioning on positive hints.
+- Prefix construction is offline. On Qwen3-4B-Base, DenoiseRL-GRPO averages 67.0 seconds per step versus 48.8 seconds for GRPO; the difference mainly follows the longer generated continuations.
+
+### Agentic decision-making
+
+The [DenoiseRL-agent](https://github.com/ALEX-nlp/DenoiseRL-agent) implementation adapts line-level reasoning prefixes to step-level action prefixes in ALFWorld. With Qwen2.5-7B-Instruct as the policy and Qwen2.5-1.5B-Instruct as the weak model:
+
+| Method | ALFWorld seen | ALFWorld unseen |
+| --- | ---: | ---: |
+| Base model | 13.6 | 12.7 |
+| GRPO | 80.7 | 79.9 |
+| **DenoiseRL-GRPO** | **96.3** | **88.1** |
+
+## Repository layout
+
+```text
 DenoiseRL/
-├── recipe/denoise/                    # DenoiseRL recipe (entrypoints, trainer, configs)
-│   ├── main_dapo.py                   # training entrypoint
-│   ├── dapo_ray_trainer.py            # Ray-based DAPO/GRPO trainer with denoise rollouts
-│   ├── data_prepare.py                # weak-model wrong-prefix construction
-│   ├── config/                        # Hydra training configs
-│   ├── denoise_qwen3-{1.7b,4b,8b}_v1.0.sh
-│   └── dapo_denoise_qwen3-{1.7b,4b,8b}_v1.0.sh
-├── verl/                              # local fork of the verl RL framework (editable install)
-├── img/DenoiseRL.png                  # overview figure
-├── paper/                             # paper PDF
+├── assets/                         # tracked README assets
+├── data/                           # local datasets (ignored)
+├── recipe/
+│   ├── README.md                   # recipe/version guide
+│   ├── denoise/                    # v1: legacy fixed-noise implementation
+│   ├── denoise_v2/                 # v2: primary adaptive curriculum
+│   └── correct_prefix/             # positive-prefix control
+├── verl/                           # customized veRL runtime
 └── requirements.txt
 ```
 
-## 5. Installation
+Local paper sources, generated outputs, scratch files, tests, and review-only artifacts are intentionally excluded from version control.
 
-DenoiseRL builds on a customized fork of `verl`. Two steps in particular are **mandatory**: installing the pinned dependencies and registering the local `verl` package in editable mode.
+## Installation
+
+Create an isolated environment, install the pinned dependencies, and run commands from the repository root so the bundled `verl` package is imported:
 
 ```bash
-# (1) Create an isolated environment and install pinned dependencies.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Note.** The `--no-deps` flag is intentional: dependency resolution is already pinned via `requirements.txt`, and re-resolving from `verl/setup.py` can silently override critical versions (e.g., `vllm`, `transformers`, `flash-attn`). The editable install ensures that any local modification to the framework propagates at runtime without re-installation.
+Hardware-sensitive packages such as `flash-attn`, `vllm`, CUDA/CuPy, or NPU components may need to be installed against the driver stack of the target cluster.
 
-Hardware-sensitive components (`flash-attn`, `vllm`, `cupy-cuda12x`, `torch_npu`, etc.) should be installed against the CUDA/driver stack of the target cluster.
+## Prepare noisy-prefix data
 
-## 6. Data Preparation
-
-`recipe/denoise/data_prepare.py` constructs the per-problem pool `W(q)` of incorrect-but-well-formed weak-model rollouts. It runs the weak model with vLLM, scores each rollout against the ground truth, and augments the source parquet with a `wrong_answer_with_boxed` column storing the wrong rollouts that nevertheless emit a parseable `\boxed{...}`.
+`recipe/denoise_v2/data_prepare.py` samples the weak model offline, verifies final boxed answers, and adds a `wrong_answer_with_boxed` pool to the source parquet:
 
 ```bash
-python recipe/denoise/data_prepare.py \
-  --model    /path/to/weak-model \
-  --dataset  /path/to/train.parquet \
+python recipe/denoise_v2/data_prepare.py \
+  --model /path/to/Qwen2.5-1.5B-Instruct \
+  --dataset /path/to/MATH7500-train.parquet \
   --rollout-n 8 \
   --output-dir ./data
 ```
 
-The resulting `*.with_wrong_boxed.parquet` is consumed directly by `TRAIN_FILE` in the training scripts. Problems with an empty wrong-rollout pool fall back to standard main rollouts, as described in the paper.
+Set `TRAIN_FILE` in the launch command to the generated `*.with_wrong_boxed.parquet`.
 
-## 7. Training
+## Train DenoiseRL v2
 
-Each model scale ships with two recipes: a GRPO-style backbone and a DAPO variant.
+The standard GRPO launchers reproduce the recovery-only, per-problem adaptive curriculum:
 
 ```bash
-# GRPO backbone
-bash recipe/denoise/denoise_qwen3-1.7b_v1.0.sh
-bash recipe/denoise/denoise_qwen3-4b_v1.0.sh
-bash recipe/denoise/denoise_qwen3-8b_v1.0.sh
+# Qwen3-4B-Base
+bash recipe/denoise_v2/grpo_denoise_qwen3-4b_v2.0-line.sh
 
-# DAPO variant
-bash recipe/denoise/dapo_denoise_qwen3-1.7b_v1.0.sh
-bash recipe/denoise/dapo_denoise_qwen3-4b_v1.0.sh
-bash recipe/denoise/dapo_denoise_qwen3-8b_v1.0.sh
+# Qwen3-8B-Base
+bash recipe/denoise_v2/grpo_denoise_qwen3-8b_v2.0-line.sh
 ```
 
-The DenoiseRL-specific knobs are exposed at the top of each script:
+DAPO-style dynamic sampling:
 
-
-| Knob                                      | Symbol | Description                                                                                |
-| ----------------------------------------- | ------ | ------------------------------------------------------------------------------------------ |
-| `n_resp_per_prompt`                       | `N`    | number of main on-policy rollouts per problem                                              |
-| `sub_rollout_k`                           | `K`    | number of denoise rollouts per problem                                                     |
-| `part_response_ratio_strategy`            | —      | `fixed` / `normal` / `uniform` sampler for `rho`                                           |
-| `part_response_ratio_fixed`               | `rho`  | prefix ratio under the `fixed` strategy                                                    |
-| `part_response_ratio_{mean,std,low,high}` | —      | parameters for `normal` / `uniform` strategies                                             |
-| `partial_mode`                            | —      | `cutdown` (mask prefix, length-fair), `shift` (gradient on prefix), `none` (no length cap) |
-| `use_problem_id_as_uid`                   | —      | share a single GRPO baseline across all `N + K` rollouts of one problem                    |
-
-
-Cluster / path settings — `MODEL_PATH`, `TRAIN_FILE`, `TEST_FILE`, `num_gpus`, `tensor_model_parallel_size` — are likewise configured at the top of each script.
-
-## 8. Reproduction Guidance
-
-To reproduce the headline numbers reported in the paper, we recommend:
-
-- **Rollout composition:** `N = 12, K = 4` per problem.
-- **Prefix intensity:** `part_response_ratio_strategy=fixed` with `part_response_ratio_fixed=0.2`.
-- **Folding policy:** `partial_mode=cutdown` (length-fair; prefix masked from PPO loss).
-- **Response budget:** `max_response_length` consistent across main and denoise rollouts.
-- **Optimization:** continuation-only gradient flow; do not enable gradients on the off-policy prefix.
-- **Group baseline:** `use_problem_id_as_uid=True` to share advantages across the full `N + K` group.
-
-Deviating from any of the above (in particular enabling gradient on the prefix or removing the length-fair cap) is documented in the paper as a source of instability.
-
-<!-- ## 9. Citation
-
-If you find this work useful, please consider citing:
-
-```bibtex
-@article{xu2026denoiserl,
-  title   = {DenoiseRL: Bootstrapping Reasoning Models to Recover from Noisy Prefixes},
-  author  = {Xu, Caijun and Xiao, Changyi and Peng, Zhongyuan and Cao, Yixin},
-  journal = {arXiv preprint},
-  year    = {2026}
-}
+```bash
+bash recipe/denoise_v2/grpo_denoise_dynamic_sample_line_qwen3-4b_v2.0.sh
+bash recipe/denoise_v2/grpo_denoise_dynamic_sample_line_qwen3-8b_v2.0.sh
 ```
 
-For questions or collaboration, please contact the corresponding authors as listed in the paper. -->
+Important defaults:
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `sub_rollout_k` | `16` | recovery rollouts per active problem |
+| `v2_initial_rho` / `v2_min_rho` | `0.0` | initial and minimum prefix ratio |
+| `v2_max_rho` | `0.5` | maximum weak-trajectory fraction |
+| `v2_target_accuracy` | `0.75` | target recovery accuracy |
+| `v2_alpha` | `0.2` | per-step controller update size |
+| `v2_history_window` | `5` | recent `rho` values used for stability |
+| `v2_slope_threshold` | `0.02` | absolute slope threshold for replacement |
+| `partial_wrong_cut_strategy` | `line` | align prefixes to complete lines |
+| `partial_mode` | `none` | keep the prefix visible and mask it from loss |
+
+Model paths, dataset paths, GPU count, tensor parallelism, response length, and experiment names can be overridden through the environment variables declared at the top of each launcher.
+
+## Controls and variants
+
+- [`recipe/correct_prefix`](./recipe/correct_prefix) implements the positive-prefix control. Its controller reverses the update direction so easy problems receive less correct assistance.
+- `grpo_denoise_qwen3-4b_v2.0-line-self.sh` uses prefixes from the frozen pre-RL policy.
+- `grpo_denoise_random_tokens_qwen3-{4b,8b}_v2.0.sh` replaces structured weak-model errors with random-token noise.
+
+For the current method, start with the v2 line-aligned launchers rather than the legacy v1 scripts.
